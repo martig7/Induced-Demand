@@ -86,8 +86,8 @@ export function runDay(
     const resPool = expand(ids, allocateInteger(resWeights, N, remCapRes));
     const jobPool = expand(ids, allocateInteger(jobWeights, N, remCapJob));
     for (const [h, w] of pairByGravity(resPool, jobPool, locations, cfg, rng)) {
-      const id = `${INDUCED_PREFIX}${ledger.seq++}`;
-      if (addInducedPop(dd, h, w, id, cfg)) {
+      if (addInducedPop(dd, h, w, `${INDUCED_PREFIX}${ledger.seq}`, cfg)) {
+        ledger.seq++;
         ledger.points[h].resAccum = Math.max(0, ledger.points[h].resAccum - cfg.POP_SIZE);
         ledger.points[w].jobAccum = Math.max(0, ledger.points[w].jobAccum - cfg.POP_SIZE);
         added++;
@@ -98,7 +98,7 @@ export function runDay(
   // D. decay (rare) — gradual removal of induced pops while accumulator is below −POP_SIZE
   let removed = 0;
   for (const p of points) {
-    const e = ledger.points[p.id];
+    const e = ledger.points[p.id]; // always initialised in section A above
     while (e.resAccum <= -cfg.POP_SIZE) {
       const id = findInduced(dd, p.id, 'residence');
       if (!id) { e.resAccum = -cfg.POP_SIZE + 1; break; }

@@ -51,9 +51,12 @@ test('engine grows residents at served home points and jobs at served job points
   assert.equal(dd.points.get('Z')!.jobs, 400);
   assert.equal(dd.points.get('H')!.residents - led.points['H'].baselineResidents, inducedResidentsAt(dd, 'H'));
   assert.equal(dd.points.get('W')!.jobs - led.points['W'].baselineJobs, inducedJobsAt(dd, 'W'));
-  let totalRes = 0, totalJob = 0;
-  for (const pop of dd.popsMap.values()) if (isInduced(pop.id)) { totalRes += pop.size; totalJob += pop.size; }
-  assert.equal(totalRes, totalJob);
+  let totalResDelta = 0, totalJobDelta = 0;
+  for (const p of dd.points.values()) {
+    totalResDelta += p.residents - led.points[p.id].baselineResidents;
+    totalJobDelta += p.jobs - led.points[p.id].baselineJobs;
+  }
+  assert.equal(totalResDelta, totalJobDelta);
   for (const pop of dd.popsMap.values()) if (isInduced(pop.id)) assert.equal(pop.size, 200);
   assert.ok(added >= 1);
 });

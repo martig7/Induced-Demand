@@ -27,6 +27,15 @@ if (!api) {
   let loggedSample = false;
   const storage = api.storage as ModStorage;
 
+  // Guard against duplicate execution: the mod loader may run this script more than
+  // once (e.g. initial load + "Reload all mods"), leaving stale hook callbacks
+  // registered. Each execution claims a generation; callbacks from any but the latest
+  // generation no-op, so exactly one instance is ever active (newest wins; hot-reload-safe).
+  const GEN_KEY = '__inducedDemandGeneration__';
+  const w = window as unknown as Record<string, number>;
+  const myGen = (w[GEN_KEY] = (w[GEN_KEY] ?? 0) + 1);
+  const isCurrent = (): boolean => w[GEN_KEY] === myGen;
+
   // Identity is read LIVE: onCityLoad/onGameInit may be skipped or fire out of order
   // for save-loaded sessions, so cached values can't be trusted for the storage key.
   const currentCity = (): string => {
@@ -98,11 +107,12 @@ if (!api) {
     }
   }
 
-  api.hooks.onCityLoad((code) => { cachedCity = code; didReconcile = false; loggedSample = false; });
-  api.hooks.onMapReady(() => { void init(); });
-  api.hooks.onGameLoaded(() => { void init(); });
+  api.hooks.onCityLoad((code) => { if (!isCurrent()) return; cachedCity = code; didReconcile = false; loggedSample = false; });
+  api.hooks.onMapReady(() => { if (!isCurrent()) return; void init(); });
+  api.hooks.onGameLoaded(() => { if (!isCurrent()) return; void init(); });
 
   api.hooks.onDayChange((day) => {
+    if (!isCurrent()) return;
     if (!ready) return;
     const dd = api.gameState.getDemandData();
     if (!dd) return;
@@ -143,6 +153,7 @@ if (!api) {
   });
 
   api.hooks.onGameSaved(async () => {
+    if (!isCurrent()) return;
     try { await saveLedger(storage, key(), ledger); } catch (e) { console.error(`${TAG} save failed`, e); }
   });
 }

@@ -77,10 +77,10 @@ if (!api) {
   const currentCity = (): string => {
     try { return api.utils.getCityCode?.() || cachedCity; } catch { return cachedCity; }
   };
-  const currentSave = (): string => {
-    try { return api.gameState.getSaveName?.() || ''; } catch { return ''; }
-  };
-  const key = (): string => `${currentCity() || 'unknown'}:${currentSave()}`;
+  // Key by CITY ONLY. The save name (getSaveName) is a timestamped autosave label that churns
+  // every autosave, so including it meant data was saved under one key and looked up under another
+  // on reload — and lost. City-only is stable across all saves/reloads of the same city.
+  const key = (): string => currentCity() || 'unknown';
 
   function hashSeed(s: string, day: number): number {
     let h = 2166136261 >>> 0;

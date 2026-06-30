@@ -11,6 +11,10 @@ import {
   loadLedger, saveLedger, captureBaselines, reconcileBaselines,
   newLedger, type LedgerState, type ModStorage,
 } from './model/ledger';
+import { buildOverlay } from './overlay/featureCollection';
+import { registerOverlay, updateOverlay, setOverlayVisible } from './overlay/overlay';
+import { createOverlayStore } from './overlay/state';
+import { createPanel } from './ui/panel';
 
 const TAG = '[InducedDemand]';
 const DEBUG = true; // verbose per-day heartbeat while verifying; set false to quiet
@@ -25,6 +29,22 @@ if (!api) {
   let ready = false;
   let didReconcile = false;
   let loggedSample = false;
+  let overlayRegistered = false;
+  let lastMax = 0;
+  const overlayStore = createOverlayStore({ enabled: false, view: 'realized', metric: 'combined' });
+
+  function refreshOverlay(): void {
+    if (!overlayStore.get().enabled) { setOverlayVisible(api, false); return; }
+    const dd = api.gameState.getDemandData();
+    if (!dd) return;
+    const s = overlayStore.get();
+    const fc = buildOverlay(dd, ledger, api.gameState.getStations(), s.view, s.metric, DEFAULT_CONFIG);
+    lastMax = fc.maxValue;
+    updateOverlay(api, fc);
+    setOverlayVisible(api, true);
+  }
+  overlayStore.subscribe(refreshOverlay);
+
   const storage = api.storage as ModStorage;
 
   // Guard against duplicate execution: the mod loader may run this script more than
@@ -108,7 +128,26 @@ if (!api) {
   }
 
   api.hooks.onCityLoad((code) => { if (!isCurrent()) return; cachedCity = code; didReconcile = false; loggedSample = false; });
-  api.hooks.onMapReady(() => { if (!isCurrent()) return; void init(); });
+  api.hooks.onMapReady(() => {
+    if (!isCurrent()) return;
+    if (!overlayRegistered) {
+      overlayRegistered = true;
+      try {
+        registerOverlay(api);
+        api.ui.addToolbarPanel({
+          id: 'induced-demand-map-mode',
+          icon: 'TrendingUp',
+          tooltip: 'Induced Demand',
+          title: 'Induced Demand',
+          width: 260,
+          render: createPanel(api, overlayStore, () => lastMax),
+        });
+      } catch (e) {
+        console.error(`${TAG} overlay/panel registration failed`, e);
+      }
+    }
+    void init();
+  });
   api.hooks.onGameLoaded(() => { if (!isCurrent()) return; void init(); });
 
   api.hooks.onDayChange((day) => {
@@ -150,6 +189,7 @@ if (!api) {
     } else if (result.added || result.removed) {
       console.log(`${TAG} day ${day}: +${result.added} -${result.removed} pops`);
     }
+    if (overlayStore.get().enabled) refreshOverlay();
   });
 
   api.hooks.onGameSaved(async () => {

@@ -19,6 +19,7 @@ if (!api) {
   let ledger: LedgerState = newLedger();
   let cityCode = '';
   let saveName = '';
+  let ready = false;
   const storage = api.storage as ModStorage;
   const key = () => `${cityCode}:${saveName}`;
 
@@ -44,6 +45,7 @@ if (!api) {
         reconcileBaselines(dd, ledger);
         captureBaselines(dd, ledger);
       }
+      ready = true;
       console.log(`${TAG} ready for ${key()}`);
     } catch (e) {
       console.error(`${TAG} init failed`, e);
@@ -52,6 +54,7 @@ if (!api) {
 
   api.hooks.onDayChange((day) => {
     try {
+      if (!ready) return;
       const dd = api.gameState.getDemandData();
       if (!dd) return;
       captureBaselines(dd, ledger);
@@ -79,6 +82,7 @@ if (!api) {
       ledger = await loadLedger(storage, key());
       const dd = api.gameState.getDemandData();
       if (dd) reconcileBaselines(dd, ledger);
+      ready = true;
     } catch (e) {
       console.error(`${TAG} load failed`, e);
     }

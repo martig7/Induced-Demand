@@ -19,10 +19,19 @@ test('transitFraction: transit / total, guards divide-by-zero', () => {
   assert.equal(transitFraction({ walking: 0, driving: 0, transit: 0, unknown: 0 }), 0);
 });
 
-test('residentialScore = resident transit fraction * access', () => {
-  assert.ok(Math.abs(residentialScore(pt(50, 0), 0.8) - 0.4) < 1e-9);
+// Access-dominant: score = access × (0.5 + 0.5 × transitFraction).
+test('residentialScore = access × (FLOOR + (1−FLOOR)×resident transit fraction)', () => {
+  // transit 50% -> factor 0.5 + 0.5*0.5 = 0.75; access 0.8 -> 0.6
+  assert.ok(Math.abs(residentialScore(pt(50, 0), 0.8) - 0.6) < 1e-9);
 });
 
-test('commercialScore = worker transit fraction * access', () => {
-  assert.ok(Math.abs(commercialScore(pt(0, 40), 0.5) - 0.2) < 1e-9);
+test('commercialScore = access × (FLOOR + (1−FLOOR)×worker transit fraction)', () => {
+  // transit 40% -> factor 0.5 + 0.5*0.4 = 0.7; access 0.5 -> 0.35
+  assert.ok(Math.abs(commercialScore(pt(0, 40), 0.5) - 0.35) < 1e-9);
+});
+
+test('zero transit share still scores half its access (floor); full transit scores full access', () => {
+  assert.ok(Math.abs(residentialScore(pt(0, 0), 0.8) - 0.4) < 1e-9);   // 0.8 × 0.5
+  assert.ok(Math.abs(residentialScore(pt(100, 0), 0.8) - 0.8) < 1e-9); // 0.8 × 1.0
+  assert.equal(residentialScore(pt(0, 0), 0), 0);                      // unserved stays 0
 });

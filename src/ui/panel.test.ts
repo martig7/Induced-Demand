@@ -12,6 +12,9 @@ test('unitsLabel describes the active view', () => {
 test('createPanel returns a component function (does not throw to construct)', () => {
   const store = createOverlayStore({ enabled: false, view: 'realized', metric: 'combined' });
   const api = { utils: { React: { createElement: () => ({}), useReducer: () => [0, () => {}], useEffect: () => {} } } } as unknown as ModdingAPI;
-  const Panel = createPanel(api, store, () => 0);
+  let resetCalls = 0;
+  const Panel = createPanel(api, store, () => 0, () => { resetCalls++; });
   assert.equal(typeof Panel, 'function');
+  assert.doesNotThrow(() => Panel()); // exercise the render body (legend + reset button)
+  assert.equal(resetCalls, 0); // onReset is wired but not fired by rendering
 });

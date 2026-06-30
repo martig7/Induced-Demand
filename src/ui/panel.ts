@@ -12,13 +12,20 @@ export function unitsLabel(view: OverlayView): string {
  * (no JSX). The returned component re-renders when the store changes.
  * `getMax()` returns the most recent FeatureCollection's maxValue for the legend.
  */
-export function createPanel(api: ModdingAPI, store: OverlayStore, getMax: () => number): () => unknown {
+export function createPanel(
+  api: ModdingAPI,
+  store: OverlayStore,
+  getMax: () => number,
+  onReset: () => void = () => {},
+): () => unknown {
   const React = api.utils.React as unknown as {
     createElement: (type: unknown, props?: unknown, ...children: unknown[]) => unknown;
     useReducer: (r: (x: number) => number, i: number) => [number, () => void];
     useEffect: (fn: () => void | (() => void), deps: unknown[]) => void;
   };
   const h = React.createElement;
+  let confirming = false; // two-click guard for the destructive reset button
+  let queued = false;     // reset queued — applied on next reload
 
   const seg = (label: string, active: boolean, onClick: () => void): unknown =>
     h('button', {
@@ -56,6 +63,25 @@ export function createPanel(api: ModdingAPI, store: OverlayStore, getMax: () => 
         h('span', null, String(Math.round(getMax())))),
       h('div', { style: { fontSize: '11px', opacity: 0.7, marginTop: '2px' } }, unitsLabel(s.view)));
 
+    const RESET_RED = '#c0392b';
+    const resetBtn = h('button', {
+      onClick: () => {
+        if (queued) return; // already queued; reload to apply
+        if (!confirming) {
+          confirming = true; force();
+          setTimeout(() => { confirming = false; force(); }, 3000);
+        } else {
+          confirming = false; queued = true; onReset(); force();
+        }
+      },
+      style: {
+        marginTop: '10px', width: '100%', padding: '4px 8px', borderRadius: '4px',
+        cursor: queued ? 'default' : 'pointer',
+        border: '1px solid ' + RESET_RED, background: confirming ? RESET_RED : 'transparent',
+        color: confirming ? '#fff' : 'inherit', fontSize: '12px',
+      },
+    }, queued ? '↻ Reload to clear induced demand' : confirming ? 'Click again to confirm' : 'Clear induced demand');
+
     return h('div', { style: { padding: '8px', minWidth: '220px' } },
       row('Show', [seg('On', s.enabled, () => store.set({ enabled: true })), seg('Off', !s.enabled, () => store.set({ enabled: false }))]),
       row('View', [seg('Realized', s.view === 'realized', () => setView('realized')), seg('Targeting', s.view === 'targeting', () => setView('targeting'))]),
@@ -64,6 +90,7 @@ export function createPanel(api: ModdingAPI, store: OverlayStore, getMax: () => 
         seg('Com', s.metric === 'commercial', () => setMetric('commercial')),
         seg('Both', s.metric === 'combined', () => setMetric('combined')),
       ]),
-      legend);
+      legend,
+      resetBtn);
   };
 }

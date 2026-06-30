@@ -6,7 +6,7 @@ import type { DemandData, Station } from './types/game-state';
 import { runDay } from './model/engine';
 import { DEFAULT_CONFIG } from './model/config';
 import { makeRng } from './model/gravity';
-import { INDUCED_PREFIX } from './model/popFactory';
+import { INDUCED_PREFIX, removeInducedPop } from './model/popFactory';
 import {
   loadLedger, saveLedger, captureBaselines, reconcileBaselines,
   newLedger, type LedgerState, type ModStorage,
@@ -46,6 +46,22 @@ if (!api) {
   overlayStore.subscribe(refreshOverlay);
 
   const storage = api.storage as ModStorage;
+  const CLEAR_KEY = '__id_pendingClear__'; // marker: clear induced demand on next load
+
+  /**
+   * "Clear induced demand" — queue a reset applied on the NEXT load. We can't delete pops in a
+   * running sim (the game holds in-flight train/journey movements that reference them by id, which
+   * we can't reach, so a deletion throws every tick). Instead we persist a marker; on reload init()
+   * removes every induced pop before the simulation builds movements (safe), then resets the ledger.
+   */
+  function resetInducedDemand(): void {
+    try {
+      void storage.set(CLEAR_KEY, '1').catch((e) => console.error(`${TAG} reset queue failed`, e));
+      console.log(`${TAG} reset QUEUED — reload the save to clear induced demand (applied safely at load).`);
+    } catch (e) {
+      console.error(`${TAG} reset failed`, e);
+    }
+  }
 
   // Guard against duplicate execution: the mod loader may run this script more than
   // once (e.g. initial load + "Reload all mods"), leaving stale hook callbacks
@@ -95,10 +111,28 @@ if (!api) {
   async function init(): Promise<void> {
     try {
       didReconcile = false;
-      ledger = await loadLedger(storage, key());
+      // Storage is only honoured during the SYNCHRONOUS part of a mod callback, so ISSUE every
+      // storage call here before any await, then await the returned promises.
+      const ledgerPromise = loadLedger(storage, key());
+      const clearPromise = storage.get<string>(CLEAR_KEY, '');
+      void storage.delete(CLEAR_KEY).catch(() => {}); // consume the marker (mod context)
+
+      const pendingClear = !!(await clearPromise);
+      ledger = await ledgerPromise;
       const dd = api.gameState.getDemandData();
+      if (dd && pendingClear) {
+        // Apply a queued "Clear induced demand" now — before the simulation builds movements for
+        // this session, so removing the pops can't dangle any in-flight journey.
+        let removed = 0;
+        for (const id of [...dd.popsMap.keys()]) {
+          if (id.startsWith(INDUCED_PREFIX) && removeInducedPop(dd, id, DEFAULT_CONFIG)) removed++;
+        }
+        ledger = newLedger();
+        console.log(`${TAG} CLEAR applied on load: removed ${removed} induced pops; ledger reset.`);
+      }
       if (dd) { ensureReconcile(dd); captureBaselines(dd, ledger); }
       ready = true;
+      refreshOverlay();
       const pts = dd ? dd.points.size : 0;
       const stations = api.gameState.getStations().length;
       console.log(`${TAG} ready for ${key()} — ${pts} demand points, ${stations} stations`);
@@ -140,7 +174,7 @@ if (!api) {
           tooltip: 'Induced Demand',
           title: 'Induced Demand',
           width: 260,
-          render: createPanel(api, overlayStore, () => lastMax),
+          render: createPanel(api, overlayStore, () => lastMax, resetInducedDemand),
         });
       } catch (e) {
         console.error(`${TAG} overlay/panel registration failed`, e);

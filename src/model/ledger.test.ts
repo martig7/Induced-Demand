@@ -55,6 +55,7 @@ test('loadLedger/saveLedger via a fake storage', async () => {
   const storage: ModStorage = {
     async get<T>(k: string, def?: T) { return (store.has(k) ? (store.get(k) as T) : (def as T)); },
     async set(k: string, v: unknown) { store.set(k, v); },
+    async delete(k: string) { store.delete(k); },
   };
   const led = newLedger();
   led.seq = 3;

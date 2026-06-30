@@ -38,7 +38,7 @@ if (!api) {
     const dd = api.gameState.getDemandData();
     if (!dd) return;
     const s = overlayStore.get();
-    const fc = buildOverlay(dd, ledger, api.gameState.getStations(), s.view, s.metric, DEFAULT_CONFIG);
+    const fc = buildOverlay(dd, api.gameState.getStations(), s.view, s.metric, DEFAULT_CONFIG);
     lastMax = fc.maxValue;
     updateOverlay(api, fc);
     setOverlayVisible(api, true);

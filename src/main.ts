@@ -123,16 +123,19 @@ if (!api) {
     if (DEBUG) {
       let induced = 0;
       for (const id of dd.popsMap.keys()) if (id.startsWith(INDUCED_PREFIX)) induced++;
-      let maxPressure = 0;
+      let maxPressure = 0, rp = 0, jp = 0, active = 0;
       for (const id in ledger.points) {
         const e = ledger.points[id];
+        if (e.resAccum > 0) rp += e.resAccum;
+        if (e.jobAccum > 0) jp += e.jobAccum;
         const m = Math.max(Math.abs(e.resAccum), Math.abs(e.jobAccum));
+        if (m > 0) active++;
         if (m > maxPressure) maxPressure = m;
       }
       console.log(
-        `${TAG} day ${day}: ${dd.points.size} pts, ${stations.length} stations, ` +
+        `${TAG} day ${day}: ${dd.points.size} pts, ${stations.length} stations, ${active} active, ` +
         `induced ${induced} (+${result.added} -${result.removed}), ` +
-        `maxPressure ${maxPressure.toFixed(1)}/${DEFAULT_CONFIG.POP_SIZE}`,
+        `Rp ${rp.toFixed(0)} Jp ${jp.toFixed(0)}, maxPressure ${maxPressure.toFixed(1)}/${DEFAULT_CONFIG.POP_SIZE}`,
       );
     } else if (result.added || result.removed) {
       console.log(`${TAG} day ${day}: +${result.added} -${result.removed} pops`);

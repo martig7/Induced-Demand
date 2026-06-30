@@ -42,8 +42,8 @@ export interface InducedDemandConfig {
 export const DEFAULT_CONFIG: InducedDemandConfig = {
   POP_SIZE: 200,
   K_MAX: 1.0,
-  R_GROW: 0.002,
-  R_DECAY: 0.0008,
+  R_GROW: 0.1,
+  R_DECAY: 0.04,
   RECONCILE: 'average',
   PHI: 0,
   ACCUM_CAP: 1000,

@@ -1,0 +1,23 @@
+{
+  "name": "subwaybuilder-induced-demand",
+  "version": "0.1.0",
+  "description": "Models long-run transit-induced demand for Subway Builder",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "postbuild": "tsx scripts/install.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test \"src/**/*.test.ts\""
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.0.9",
+    "@types/react": "^19.2.9",
+    "maplibre-gl": "^5.18.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3",
+    "vite": "npm:rolldown-vite@latest",
+    "vite-plugin-static-copy": "^3.0.0"
+  }
+}

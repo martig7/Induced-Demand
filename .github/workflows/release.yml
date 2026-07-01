@@ -27,18 +27,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        # `npm install` (not `npm ci`): npm ci strictly installs every platform-specific optional
+        # dep in the lockfile (esbuild ships one per OS/CPU) and errors EBADPLATFORM on foreign ones;
+        # npm install skips the incompatible optionals correctly.
+        run: npm install --no-audit --no-fund
 
       - name: Verify tag matches package.json / manifest.json
         run: |

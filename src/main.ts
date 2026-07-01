@@ -6,7 +6,7 @@ import type { DemandData, Station } from './types/game-state';
 import { runDay } from './model/engine';
 import { DEFAULT_CONFIG } from './model/config';
 import { makeRng } from './model/gravity';
-import { INDUCED_PREFIX } from './model/popFactory';
+import { INDUCED_PREFIX, removeInducedPop } from './model/popFactory';
 import {
   loadLedger, saveLedger, captureBaselines, reconcileBaselines,
   newLedger, type LedgerState, type ModStorage,
@@ -46,6 +46,25 @@ if (!api) {
   overlayStore.subscribe(refreshOverlay);
 
   const storage = api.storage as ModStorage;
+  // Marker: clear induced demand on next load. Value is exactly '1' when queued, '' once consumed.
+  // (Fresh key name so any stuck legacy '__id_pendingClear__' marker is ignored, not re-applied.)
+  const CLEAR_KEY = '__id_clear_req__';
+  const CLEAR_ON = '1';
+
+  /**
+   * "Clear induced demand" — queue a reset applied on the NEXT load. We can't delete pops in a
+   * running sim (the game holds in-flight train/journey movements that reference them by id, which
+   * we can't reach, so a deletion throws every tick). Instead we persist a marker; on reload init()
+   * removes every induced pop before the simulation builds movements (safe), then resets the ledger.
+   */
+  function resetInducedDemand(): void {
+    try {
+      void storage.set(CLEAR_KEY, CLEAR_ON).catch((e) => console.error(`${TAG} reset queue failed`, e));
+      console.log(`${TAG} reset QUEUED — reload the save to clear induced demand (applied safely at load).`);
+    } catch (e) {
+      console.error(`${TAG} reset failed`, e);
+    }
+  }
 
   // Guard against duplicate execution: the mod loader may run this script more than
   // once (e.g. initial load + "Reload all mods"), leaving stale hook callbacks
@@ -61,10 +80,10 @@ if (!api) {
   const currentCity = (): string => {
     try { return api.utils.getCityCode?.() || cachedCity; } catch { return cachedCity; }
   };
-  const currentSave = (): string => {
-    try { return api.gameState.getSaveName?.() || ''; } catch { return ''; }
-  };
-  const key = (): string => `${currentCity() || 'unknown'}:${currentSave()}`;
+  // Key by CITY ONLY. The save name (getSaveName) is a timestamped autosave label that churns
+  // every autosave, so including it meant data was saved under one key and looked up under another
+  // on reload — and lost. City-only is stable across all saves/reloads of the same city.
+  const key = (): string => currentCity() || 'unknown';
 
   function hashSeed(s: string, day: number): number {
     let h = 2166136261 >>> 0;
@@ -95,10 +114,30 @@ if (!api) {
   async function init(): Promise<void> {
     try {
       didReconcile = false;
-      ledger = await loadLedger(storage, key());
+      // Storage is only honoured during the SYNCHRONOUS part of a mod callback, so ISSUE every
+      // storage call here before any await, then await the returned promises.
+      const ledgerPromise = loadLedger(storage, key());
+      const clearPromise = storage.get<string>(CLEAR_KEY, '');
+      void storage.set(CLEAR_KEY, '').catch(() => {}); // consume the marker every load (overwrite; delete proved unreliable)
+
+      // Require the EXACT queued value, not just truthiness — storage can return odd values
+      // (e.g. objects) for a key, and `!!` on those wrongly fired the clear on every load.
+      const pendingClear = (await clearPromise) === CLEAR_ON;
+      ledger = await ledgerPromise;
       const dd = api.gameState.getDemandData();
+      if (dd && pendingClear) {
+        // Apply a queued "Clear induced demand" now — before the simulation builds movements for
+        // this session, so removing the pops can't dangle any in-flight journey.
+        let removed = 0;
+        for (const id of [...dd.popsMap.keys()]) {
+          if (id.startsWith(INDUCED_PREFIX) && removeInducedPop(dd, id, DEFAULT_CONFIG)) removed++;
+        }
+        ledger = newLedger();
+        console.log(`${TAG} CLEAR applied on load: removed ${removed} induced pops; ledger reset.`);
+      }
       if (dd) { ensureReconcile(dd); captureBaselines(dd, ledger); }
       ready = true;
+      refreshOverlay();
       const pts = dd ? dd.points.size : 0;
       const stations = api.gameState.getStations().length;
       console.log(`${TAG} ready for ${key()} — ${pts} demand points, ${stations} stations`);
@@ -127,8 +166,9 @@ if (!api) {
     }
   }
 
-  api.hooks.onCityLoad((code) => { if (!isCurrent()) return; cachedCity = code; didReconcile = false; loggedSample = false; });
-  api.hooks.onMapReady(() => {
+  // Register the overlay/panel (once) and initialize. Driven by onMapReady, and also called
+  // proactively below when the game is already loaded (mod hot-reload — see note at the bottom).
+  function setup(): void {
     if (!isCurrent()) return;
     if (!overlayRegistered) {
       overlayRegistered = true;
@@ -140,14 +180,17 @@ if (!api) {
           tooltip: 'Induced Demand',
           title: 'Induced Demand',
           width: 260,
-          render: createPanel(api, overlayStore, () => lastMax),
+          render: createPanel(api, overlayStore, () => lastMax, resetInducedDemand),
         });
       } catch (e) {
         console.error(`${TAG} overlay/panel registration failed`, e);
       }
     }
     void init();
-  });
+  }
+
+  api.hooks.onCityLoad((code) => { if (!isCurrent()) return; cachedCity = code; didReconcile = false; loggedSample = false; });
+  api.hooks.onMapReady(setup);
   api.hooks.onGameLoaded(() => { if (!isCurrent()) return; void init(); });
 
   api.hooks.onDayChange((day) => {
@@ -196,4 +239,11 @@ if (!api) {
     if (!isCurrent()) return;
     try { await saveLedger(storage, key(), ledger); } catch (e) { console.error(`${TAG} save failed`, e); }
   });
+
+  // Mod hot-reload safety: on "Reload all mods" this script re-runs, but onMapReady/onGameLoaded
+  // won't fire again for an already-loaded game — so the fresh instance would never become `ready`
+  // and would stop triggering growth. If demand data is already available, set up right now.
+  try {
+    if (api.gameState.getDemandData()) setup();
+  } catch { /* game not loaded yet — the hooks will fire normally */ }
 }

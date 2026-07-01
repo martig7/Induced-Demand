@@ -63,7 +63,8 @@ test('targeting uses the model score (point at a served station)', () => {
   const dd: DemandData = { points: new Map([['H', pt('H', [0, 0], 400, 0, 50, 0)]]), popsMap: new Map() };
   const fc = buildOverlay(dd, [station([0, 0], ['r1', 'r2', 'r3'])], 'targeting', 'residential', DEFAULT_CONFIG);
   assert.equal(fc.features.length, 1);
-  assert.ok(Math.abs(fc.features[0].properties.value - 0.5) < 1e-6);
+  // access-dominant score: access(1.0) × (0.5 + 0.5×0.5) = 0.75
+  assert.ok(Math.abs(fc.features[0].properties.value - 0.75) < 1e-6);
 });
 
 test('normalization sets t = value / maxValue across points', () => {

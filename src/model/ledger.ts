@@ -18,6 +18,7 @@ export interface LedgerState {
 export interface ModStorage {
   get<T = unknown>(key: string, defaultValue?: T): Promise<T>;
   set(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<void>;
 }
 
 export function newLedger(): LedgerState {

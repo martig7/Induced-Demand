@@ -1,3 +1,8 @@
 node_modules/
 dist/
 test_data/
+
+# release scratch (drafted by `npm run release`, consumed when the tag is cut)
+RELEASE_NOTES.md
+# local city-data dumps from the in-game console snippet
+induced-demand-citydump-*.json

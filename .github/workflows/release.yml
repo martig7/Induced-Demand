@@ -68,6 +68,9 @@ jobs:
       - name: Extract release notes from tag
         id: notes
         run: |
+          # Ensure the ANNOTATED tag object (with its message) is present — checkout may leave only
+          # a peeled/lightweight ref, which makes %(contents:body) empty.
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
           BODY="$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")"
           if [ -z "$BODY" ]; then
             echo "has_notes=false" >> "$GITHUB_OUTPUT"

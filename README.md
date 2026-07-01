@@ -2,11 +2,7 @@
 
 A **Subway Builder** mod that models long-run, transit-**induced** demand: over time it
 grows residential and commercial demand around well-served stations by adding commuter
-pops — the real-world pattern where good transit access pulls people and jobs toward it.
-
-It only ever touches demand. It **reads** the game's simulated mode share and station
-catchment as inputs and **writes** demand (residents, jobs, and the commuter pops that
-generate ridership). It never changes catchment or mode share — those stay the game's job.
+pops.
 
 ## How it works
 
@@ -20,39 +16,35 @@ Each in-game day the engine runs one pass over every demand point:
    - The `MODE_SHARE_FLOOR` (0.5) makes *access* the dominant term: a well-served point still
      scores half its access even at zero current ridership, so demand can grow near new transit
      before riders have shown up. Mode share modulates within `[FLOOR, 1]`.
-2. **Cap & growth** — each point has a soft ceiling `cap = baseline × (1 + K_MAX × score)`
+2. **Cap & growth**: each point has a soft ceiling `cap = baseline × (1 + K_MAX × score)`
    and grows **logistically** toward it. High-score points can gain the most; unserved
    points (score 0) don't grow.
-3. **Net-equal, gravity-paired** — added residents always equal added jobs. New demand is
-   created as **pops** (a fixed unit of **200 people**) that are gravity-matched into
-   home↔job pairs, so the residents↔jobs accounting the game UI relies on stays balanced.
-4. **Decay** *(limited — see Status)* — designed to slowly shrink induced demand when a
+3. **Net-equal, gravity-paired**: added residents always equal added jobs. New demand is
+   created as 200-person pops that are gravity-matched into home-job pairs.
+4. **Decay** *(limited, see Status)*: designed to slowly shrink induced demand when a
    point loses service.
 
 A small per-city **ledger** records each point's original baseline (self-healing on load),
 so the mod always knows how much demand is "induced" versus original.
 
 The model's parameters and the research behind them live in
-[`docs/RESEARCH_induced_demand.md`](docs/RESEARCH_induced_demand.md); the game demand API it
-builds on is documented in [`docs/DEMAND_API.md`](docs/DEMAND_API.md).
+[`docs/RESEARCH_induced_demand.md`](docs/RESEARCH_induced_demand.md); the game demand API
+is documented in [`docs/DEMAND_API.md`](docs/DEMAND_API.md).
 
 ## The map mode
 
 The mod adds an **Induced Demand** toolbar panel that renders demand points as circles on
 the map:
 
-- **Show** — On / Off.
+- **Show**: On / Off.
 - **View**:
-  - **Realized** — the demand the mod has actually added so far (from its induced pops).
-  - **Targeting** — the model's per-point transit score, i.e. *where it wants to grow*.
-- **Metric** — Residential / Commercial / Both.
+  - **Realized**: the demand the mod has actually added so far (from its induced pops).
+  - **Targeting**: the model's per-point transit score.
+- **Metric**: Residential / Commercial / Both.
 - A legend showing the value scale.
-- **Clear induced demand** — a two-click reset that wipes the mod's added demand. Because
+- **Clear induced demand**: a two-click reset that wipes the mod's added demand. Because
   pops can't be safely deleted mid-simulation, it queues the clear and applies it on the
   next reload.
-
-Circles are **constant real-world size**: their radius scales with zoom (doubling per zoom
-level), so a dot keeps a fixed ground footprint and grows on screen as you zoom in.
 
 ## Install
 
@@ -62,7 +54,7 @@ in-game mod manager.
 
 **From source:** `npm install && npm run build`. The build compiles to `dist/index.js` and
 copies the mod (with `manifest.json`) into your local mods folder
-(`%APPDATA%/metro-maker4/mods/induced-demand`), ready to enable in-game.
+(`%APPDATA%/metro-maker4/mods/induced-demand`).
 
 ### Requirements
 
@@ -77,8 +69,8 @@ npm run typecheck
 npm run build   # vite build → dist/, then installs into the mods folder
 ```
 
-The model is pure and framework-free, so it runs and is unit-tested entirely in Node — no
-game required.
+The model is pure and framework-free, so it runs and is unit-tested entirely in Node. This allows
+for simulation without running the game.
 
 ### Releasing
 
@@ -120,16 +112,18 @@ src/
 
 ## Status
 
-- [x] Access-dominant growth model — grows demand near well-served stations, working on real
+- [x] Access-dominant growth model grows demand near well-served stations, working on real
       low-transit-share cities
-- [x] Net-equal residents↔jobs, gravity-paired 200-person pops
+- [x] Net-equal residents-jobs, gravity-paired 200-person pops
 - [x] Map mode: Realized / Targeting × Residential / Commercial / Both, constant-ground-size dots
 - [x] Per-city persistent ledger + "Clear induced demand" reset
 - [ ] **Decay** (shrinking induced demand when service is removed) — present but limited:
       deleting pops from a running simulation disturbs the game's in-flight commute movements,
       so it isn't reliable yet
-- [ ] **Relocation** (moving *existing* demand toward transit) — prototyped and removed; it
-      fought the game's pop/movement model
+- [ ] **Relocation** (moving *existing* demand toward transit): Currently removing pops from original demand data
+      is not possible via the modding API.
+- [ ] **Map Interaction** Eventually the user should be able to click on induced demand dots in the map mode to show
+      a view similar to the base game analytics.
 
 Actively developed. Send me saves or feedback on Discord (id **gcm**).
 

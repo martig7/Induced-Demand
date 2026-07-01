@@ -166,8 +166,9 @@ if (!api) {
     }
   }
 
-  api.hooks.onCityLoad((code) => { if (!isCurrent()) return; cachedCity = code; didReconcile = false; loggedSample = false; });
-  api.hooks.onMapReady(() => {
+  // Register the overlay/panel (once) and initialize. Driven by onMapReady, and also called
+  // proactively below when the game is already loaded (mod hot-reload — see note at the bottom).
+  function setup(): void {
     if (!isCurrent()) return;
     if (!overlayRegistered) {
       overlayRegistered = true;
@@ -186,7 +187,10 @@ if (!api) {
       }
     }
     void init();
-  });
+  }
+
+  api.hooks.onCityLoad((code) => { if (!isCurrent()) return; cachedCity = code; didReconcile = false; loggedSample = false; });
+  api.hooks.onMapReady(setup);
   api.hooks.onGameLoaded(() => { if (!isCurrent()) return; void init(); });
 
   api.hooks.onDayChange((day) => {
@@ -235,4 +239,11 @@ if (!api) {
     if (!isCurrent()) return;
     try { await saveLedger(storage, key(), ledger); } catch (e) { console.error(`${TAG} save failed`, e); }
   });
+
+  // Mod hot-reload safety: on "Reload all mods" this script re-runs, but onMapReady/onGameLoaded
+  // won't fire again for an already-loaded game — so the fresh instance would never become `ready`
+  // and would stop triggering growth. If demand data is already available, set up right now.
+  try {
+    if (api.gameState.getDemandData()) setup();
+  } catch { /* game not loaded yet — the hooks will fire normally */ }
 }

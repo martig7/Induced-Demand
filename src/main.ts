@@ -46,7 +46,10 @@ if (!api) {
   overlayStore.subscribe(refreshOverlay);
 
   const storage = api.storage as ModStorage;
-  const CLEAR_KEY = '__id_pendingClear__'; // marker: clear induced demand on next load
+  // Marker: clear induced demand on next load. Value is exactly '1' when queued, '' once consumed.
+  // (Fresh key name so any stuck legacy '__id_pendingClear__' marker is ignored, not re-applied.)
+  const CLEAR_KEY = '__id_clear_req__';
+  const CLEAR_ON = '1';
 
   /**
    * "Clear induced demand" — queue a reset applied on the NEXT load. We can't delete pops in a
@@ -56,7 +59,7 @@ if (!api) {
    */
   function resetInducedDemand(): void {
     try {
-      void storage.set(CLEAR_KEY, '1').catch((e) => console.error(`${TAG} reset queue failed`, e));
+      void storage.set(CLEAR_KEY, CLEAR_ON).catch((e) => console.error(`${TAG} reset queue failed`, e));
       console.log(`${TAG} reset QUEUED — reload the save to clear induced demand (applied safely at load).`);
     } catch (e) {
       console.error(`${TAG} reset failed`, e);
@@ -115,9 +118,11 @@ if (!api) {
       // storage call here before any await, then await the returned promises.
       const ledgerPromise = loadLedger(storage, key());
       const clearPromise = storage.get<string>(CLEAR_KEY, '');
-      void storage.delete(CLEAR_KEY).catch(() => {}); // consume the marker (mod context)
+      void storage.set(CLEAR_KEY, '').catch(() => {}); // consume the marker every load (overwrite; delete proved unreliable)
 
-      const pendingClear = !!(await clearPromise);
+      // Require the EXACT queued value, not just truthiness — storage can return odd values
+      // (e.g. objects) for a key, and `!!` on those wrongly fired the clear on every load.
+      const pendingClear = (await clearPromise) === CLEAR_ON;
       ledger = await ledgerPromise;
       const dd = api.gameState.getDemandData();
       if (dd && pendingClear) {

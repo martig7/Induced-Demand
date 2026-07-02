@@ -8,7 +8,7 @@ pops.
 
 Each in-game day the engine runs one pass over every demand point:
 
-1. **Score** — how transit-attractive the point is, in `[0, 1]`:
+1. **Score**: how transit-attractive the point is, in `[0, 1]`:
    `score = access × (FLOOR + (1 − FLOOR) × transitFraction)`.
    - **access** is a walk-time Gaussian decay within the station catchment, boosted by how
      many distinct lines are reachable (connectivity).

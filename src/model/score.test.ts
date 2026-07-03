@@ -19,6 +19,19 @@ test('transitFraction: transit / total, guards divide-by-zero', () => {
   assert.equal(transitFraction({ walking: 0, driving: 0, transit: 0, unknown: 0 }), 0);
 });
 
+// Saves from older versions restore DemandPoints before the commute sim recomputes
+// residentModeShare/workerModeShare, so those fields can be undefined. Missing data
+// must be treated as "no transit share" (0), not throw.
+test('transitFraction: missing mode-share data is treated as 0', () => {
+  assert.equal(transitFraction(undefined as unknown as ModeChoiceStats), 0);
+});
+
+test('residential/commercial score tolerate missing mode share (fall back to floor)', () => {
+  const p = { id: 'p', location: [0, 0], jobs: 0, residents: 0, popIds: [] } as unknown as DemandPoint;
+  assert.ok(Math.abs(residentialScore(p, 0.8) - 0.4) < 1e-9); // 0.8 × FLOOR
+  assert.ok(Math.abs(commercialScore(p, 0.8) - 0.4) < 1e-9);  // 0.8 × FLOOR
+});
+
 // Access-dominant: score = access × (0.5 + 0.5 × transitFraction).
 test('residentialScore = access × (FLOOR + (1−FLOOR)×resident transit fraction)', () => {
   // transit 50% -> factor 0.5 + 0.5*0.5 = 0.75; access 0.8 -> 0.6

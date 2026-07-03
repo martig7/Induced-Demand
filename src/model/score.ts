@@ -10,8 +10,14 @@ import { clamp01 } from './util';
  */
 export const MODE_SHARE_FLOOR = 0.5;
 
-/** Transit share as a fraction in [0,1]. Works whether stats are counts or shares. */
-export function transitFraction(m: ModeChoiceStats): number {
+/**
+ * Transit share as a fraction in [0,1]. Works whether stats are counts or shares.
+ * `residentModeShare`/`workerModeShare` are computed at runtime by the commute sim, so
+ * a freshly-loaded save (e.g. from an older version) can have them undefined until the
+ * next sim cycle. Treat missing data as no transit share (0) rather than throwing.
+ */
+export function transitFraction(m: ModeChoiceStats | undefined | null): number {
+  if (!m) return 0;
   const total = m.walking + m.driving + m.transit + m.unknown;
   return total > 0 ? m.transit / total : 0;
 }

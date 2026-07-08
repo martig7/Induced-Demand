@@ -1,5 +1,6 @@
 import type { DemandData } from '../types/game-state';
-import { INDUCED_PREFIX } from './popFactory';
+import type { InducedDemandConfig } from './config';
+import { INDUCED_PREFIX, isInduced, addInducedPop } from './popFactory';
 
 export interface PointLedger {
   baselineResidents: number;
@@ -8,21 +9,86 @@ export interface PointLedger {
   jobAccum: number;
 }
 
-export interface LedgerState {
-  points: Record<string, PointLedger>;
-  /** Monotonic counter for induced pop ids. */
-  seq: number;
+/** The residence/job endpoints of one induced pop — enough to rebuild it. */
+export interface InducedPopRecord {
+  residenceId: string;
+  jobId: string;
 }
 
-/** Minimal slice of `api.storage` we depend on (keeps ledger testable). */
-export interface ModStorage {
-  get<T = unknown>(key: string, defaultValue?: T): Promise<T>;
-  set(key: string, value: unknown): Promise<void>;
-  delete(key: string): Promise<void>;
+export interface LedgerState {
+  points: Record<string, PointLedger>;
+  /**
+   * Authoritative roster of the induced pops this mod created, keyed by pop id.
+   * The game save is NOT trusted to preserve them: if a reload (or the sim's
+   * per-cycle re-derivation) drops an induced pop, `reconcileInducedPops` re-adds
+   * every roster entry the live demand data is missing.
+   */
+  pops: Record<string, InducedPopRecord>;
+  /** Monotonic counter for induced pop ids. */
+  seq: number;
+  /**
+   * Transient: growth accumulators loaded from the store, keyed by point id as `[res, job]`.
+   * Applied by `applyPendingAccum` AFTER baselines are re-derived (baselines aren't persisted),
+   * then deleted. Never set on a live ledger — only present between load and reconcile.
+   */
+  pendingAccum?: Record<string, [number, number]>;
+}
+
+/**
+ * Minimal synchronous key/value store (the `localStorage` shape). We persist through
+ * `localStorage`, NOT `api.storage`: the game's mod-storage keeps an in-memory map that it
+ * does NOT rehydrate from disk on a cold launch, so `api.storage.get` returns nothing after a
+ * full restart (it only survived warm, in-session reloads). `localStorage` is hydrated by
+ * Electron on cold start, so the roster actually round-trips (this is what Improved Schematics
+ * uses). Injectable so the persistence is unit-testable.
+ */
+export interface KVStore {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
 }
 
 export function newLedger(): LedgerState {
-  return { points: {}, seq: 0 };
+  return { points: {}, pops: {}, seq: 0 };
+}
+
+/**
+ * True only for a fully-empty ledger (no baselines, no roster, no growth). A real
+ * saved ledger always has baseline points (capture runs before any save), so this
+ * distinguishes a genuine load from a `storage`-returned-nothing load during the
+ * game's load-window storage bug — such a load must not be trusted or persisted.
+ */
+export function isPristineLedger(l: LedgerState): boolean {
+  return l.seq === 0
+    && Object.keys(l.pops).length === 0
+    && Object.keys(l.points).length === 0;
+}
+
+/**
+ * Reconcile the induced-pop roster against live demand data (run once per load):
+ *  - adopt any induced pop present in `dd` but not yet tracked (self-heal when the
+ *    ledger was blank/lost but the save kept the pops);
+ *  - restore any tracked pop the save dropped by re-adding it to `dd`.
+ * A roster entry whose endpoints no longer exist is stale and gets pruned.
+ * Returns the number of pops re-added to `dd`.
+ */
+export function reconcileInducedPops(
+  dd: DemandData,
+  ledger: LedgerState,
+  cfg: InducedDemandConfig,
+): number {
+  for (const pop of dd.popsMap.values()) {
+    if (isInduced(pop.id) && !ledger.pops[pop.id]) {
+      ledger.pops[pop.id] = { residenceId: pop.residenceId, jobId: pop.jobId };
+    }
+  }
+  let restored = 0;
+  for (const [id, rec] of Object.entries(ledger.pops)) {
+    if (dd.popsMap.has(id)) continue;
+    if (addInducedPop(dd, rec.residenceId, rec.jobId, id, cfg)) restored++;
+    else delete ledger.pops[id]; // endpoints gone — drop the stale roster entry
+  }
+  return restored;
 }
 
 /** Record baselines for points not yet in the ledger. Never overwrites. */
@@ -63,25 +129,64 @@ export function reconcileBaselines(dd: DemandData, ledger: LedgerState): void {
   }
 }
 
-export function serialize(ledger: LedgerState): string {
-  return JSON.stringify(ledger);
+/**
+ * Compact persisted form: `seq`, the induced-pop roster, and the SPARSE growth accumulators
+ * (only points with nonzero pressure). Baselines are deliberately dropped — every point has one,
+ * so they'd bloat the payload; they re-derive from live demand on load (`reconcileBaselines`),
+ * while the accumulators (few points) are carried so growth pressure survives a reload.
+ * localStorage is shared + quota-limited, hence the sparseness.
+ */
+export function serializeForStore(ledger: LedgerState): string {
+  const accum: Record<string, [number, number]> = {};
+  for (const [id, e] of Object.entries(ledger.points)) {
+    if (e.resAccum !== 0 || e.jobAccum !== 0) accum[id] = [e.resAccum, e.jobAccum];
+  }
+  return JSON.stringify({ seq: ledger.seq, pops: ledger.pops, accum });
 }
 
-export function deserialize(s: string | null | undefined): LedgerState {
+export function deserializeFromStore(s: string | null | undefined): LedgerState {
   if (!s) return newLedger();
   try {
     const o = JSON.parse(s);
-    return { points: o.points ?? {}, seq: typeof o.seq === 'number' ? o.seq : 0 };
+    const led: LedgerState = {
+      points: {}, // baselines re-derived from live demand each load
+      pops: o.pops ?? {},
+      seq: typeof o.seq === 'number' ? o.seq : 0,
+    };
+    if (o.accum && typeof o.accum === 'object') led.pendingAccum = o.accum;
+    return led;
   } catch {
     return newLedger();
   }
 }
 
-export async function loadLedger(storage: ModStorage, key: string): Promise<LedgerState> {
-  const raw = await storage.get<string>(key, '');
-  return deserialize(raw);
+/**
+ * Apply accumulators loaded from the store onto their points, then clear the pending record.
+ * Must run AFTER baselines are derived (`reconcileBaselines`) so it only sets pressure on points
+ * that already have baselines; points that no longer exist are skipped.
+ */
+export function applyPendingAccum(ledger: LedgerState): void {
+  const acc = ledger.pendingAccum;
+  if (!acc) return;
+  for (const [id, [res, job]] of Object.entries(acc)) {
+    const e = ledger.points[id];
+    if (e) { e.resAccum = res; e.jobAccum = job; }
+  }
+  delete ledger.pendingAccum;
 }
 
-export async function saveLedger(storage: ModStorage, key: string, ledger: LedgerState): Promise<void> {
-  await storage.set(key, serialize(ledger));
+export function loadFromStore(store: KVStore, key: string): LedgerState {
+  try {
+    return deserializeFromStore(store.getItem(key));
+  } catch {
+    return newLedger();
+  }
+}
+
+export function saveToStore(store: KVStore, key: string, ledger: LedgerState): void {
+  try {
+    store.setItem(key, serializeForStore(ledger));
+  } catch {
+    /* quota or unavailable — the roster just won't survive this cold restart; not fatal */
+  }
 }

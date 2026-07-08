@@ -86,7 +86,9 @@ export function runDay(
     const resPool = expand(ids, allocateInteger(resWeights, N, remCapRes));
     const jobPool = expand(ids, allocateInteger(jobWeights, N, remCapJob));
     for (const [h, w] of pairByGravity(resPool, jobPool, locations, cfg, rng)) {
-      if (addInducedPop(dd, h, w, `${INDUCED_PREFIX}${ledger.seq}`, cfg)) {
+      const id = `${INDUCED_PREFIX}${ledger.seq}`;
+      if (addInducedPop(dd, h, w, id, cfg)) {
+        ledger.pops[id] = { residenceId: h, jobId: w }; // track so a lost save can restore it
         ledger.seq++;
         ledger.points[h].resAccum = Math.max(0, ledger.points[h].resAccum - cfg.POP_SIZE);
         ledger.points[w].jobAccum = Math.max(0, ledger.points[w].jobAccum - cfg.POP_SIZE);
@@ -103,6 +105,7 @@ export function runDay(
       const id = findInduced(dd, p.id, 'residence');
       if (!id) { e.resAccum = -cfg.POP_SIZE + 1; break; }
       removeInducedPop(dd, id, cfg);
+      delete ledger.pops[id];
       e.resAccum += cfg.POP_SIZE;
       removed++;
     }
@@ -110,6 +113,7 @@ export function runDay(
       const id = findInduced(dd, p.id, 'job');
       if (!id) { e.jobAccum = -cfg.POP_SIZE + 1; break; }
       removeInducedPop(dd, id, cfg);
+      delete ledger.pops[id];
       e.jobAccum += cfg.POP_SIZE;
       removed++;
     }

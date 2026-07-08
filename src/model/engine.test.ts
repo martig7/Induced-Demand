@@ -61,6 +61,34 @@ test('engine grows residents at served home points and jobs at served job points
   assert.ok(added >= 1);
 });
 
+test('engine records every induced pop it creates in the ledger roster', () => {
+  const dd = world();
+  const led: LedgerState = newLedger();
+  captureBaselines(dd, led);
+  const stations = [station('s', [0, 0], ['r1', 'r2', 'r3'])];
+  for (let day = 0; day < 400; day++) runDay(dd, stations, led, cfg, makeRng(day));
+
+  const inducedIds = [...dd.popsMap.values()].filter((p) => isInduced(p.id)).map((p) => p.id);
+  assert.ok(inducedIds.length >= 1);
+  assert.equal(Object.keys(led.pops).length, inducedIds.length);
+  for (const id of inducedIds) {
+    const pop = dd.popsMap.get(id)!;
+    assert.deepEqual(led.pops[id], { residenceId: pop.residenceId, jobId: pop.jobId });
+  }
+});
+
+test('engine removes roster entries when it decays induced pops', () => {
+  const dd = world();
+  const led: LedgerState = newLedger();
+  captureBaselines(dd, led);
+  const stations = [station('s', [0, 0], ['r1', 'r2', 'r3'])];
+  for (let day = 0; day < 400; day++) runDay(dd, stations, led, cfg, makeRng(day));
+  assert.ok(Object.keys(led.pops).length >= 1);
+
+  for (let day = 0; day < 400; day++) runDay(dd, [], led, cfg, makeRng(1000 + day));
+  assert.equal(Object.keys(led.pops).length, 0); // all decayed → roster empty
+});
+
 test('engine decays induced demand when the station is removed, never below baseline', () => {
   const dd = world();
   const led: LedgerState = newLedger();

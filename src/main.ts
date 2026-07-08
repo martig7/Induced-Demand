@@ -8,12 +8,12 @@ import { DEFAULT_CONFIG } from './model/config';
 import { makeRng } from './model/gravity';
 import { INDUCED_PREFIX, removeInducedPop } from './model/popFactory';
 import {
-  loadLedger, saveLedger, captureBaselines, reconcileBaselines,
-  newLedger, type LedgerState, type ModStorage,
+  loadFromStore, saveToStore, captureBaselines, reconcileBaselines, reconcileInducedPops,
+  applyPendingAccum, newLedger, type LedgerState, type KVStore,
 } from './model/ledger';
 import { buildOverlay } from './overlay/featureCollection';
 import { registerOverlay, updateOverlay, setOverlayVisible } from './overlay/overlay';
-import { createOverlayStore } from './overlay/state';
+import { createOverlayStore, type OverlayStore } from './overlay/state';
 import { createPanel } from './ui/panel';
 
 const TAG = '[InducedDemand]';
@@ -25,13 +25,32 @@ if (!api) {
   console.error(`${TAG} SubwayBuilderAPI not found.`);
 } else {
   let ledger: LedgerState = newLedger();
+  let ledgerCity = ''; // which city's roster is currently in memory (guards saving under the wrong key)
   let cachedCity = '';
   let ready = false;
   let didReconcile = false;
   let loggedSample = false;
-  let overlayRegistered = false;
+
+  // Cross-reload UI state, persisted on `window` like `myGen` below: "Reload all mods" re-executes
+  // this whole script, but `api.ui.addToolbarPanel` has no id-based de-dupe — it just pushes onto an
+  // array — so calling it again on every reload stacked a 2nd (3rd, ...) inert-but-visible icon
+  // forever. Register the panel/overlay AT MOST ONCE per app session (module-local `registered` would
+  // reset on every reload; this doesn't), and share the SAME overlayStore object across reloads too —
+  // the panel added on session 1 is the only one that's ever shown, and because later generations'
+  // fresh onDayChange hooks read/subscribe to that SAME store (not a fresh disabled-by-default one),
+  // toggling the (permanently gen-1-bound) panel still drives every later generation's auto-refresh.
+  interface PersistentUi { registered: boolean; overlayStore: OverlayStore }
+  const UI_KEY = '__inducedDemandUi__';
+  const wUi = window as unknown as Record<string, PersistentUi>;
+  if (!wUi[UI_KEY]) {
+    wUi[UI_KEY] = {
+      registered: false,
+      overlayStore: createOverlayStore({ enabled: false, view: 'realized', metric: 'combined' }),
+    };
+  }
+  const persistentUi = wUi[UI_KEY];
+  const overlayStore = persistentUi.overlayStore;
   let lastMax = 0;
-  const overlayStore = createOverlayStore({ enabled: false, view: 'realized', metric: 'combined' });
 
   function refreshOverlay(): void {
     if (!overlayStore.get().enabled) { setOverlayVisible(api, false); return; }
@@ -45,10 +64,16 @@ if (!api) {
   }
   overlayStore.subscribe(refreshOverlay);
 
-  const storage = api.storage as ModStorage;
-  // Marker: clear induced demand on next load. Value is exactly '1' when queued, '' once consumed.
-  // (Fresh key name so any stuck legacy '__id_pendingClear__' marker is ignored, not re-applied.)
-  const CLEAR_KEY = '__id_clear_req__';
+  // Persist through localStorage, NOT api.storage: the game's mod-storage keeps an in-memory map it
+  // does NOT rehydrate from disk on a cold launch, so api.storage.get returns nothing after a full
+  // restart (it survived only warm, in-session reloads). localStorage IS hydrated by Electron on
+  // cold start, so the roster actually round-trips. (Same approach as the Improved Schematics mod.)
+  const store: KVStore | null = (() => {
+    try { return window.localStorage; } catch { return null; }
+  })();
+  const LEDGER_KEY = (city: string): string => `induceddemand:ledger:${city}`;
+  // Clear-demand marker: set on click, applied + cleared on the next load. Kept as its own key.
+  const CLEAR_KEY = 'induceddemand:clear';
   const CLEAR_ON = '1';
 
   /**
@@ -59,7 +84,7 @@ if (!api) {
    */
   function resetInducedDemand(): void {
     try {
-      void storage.set(CLEAR_KEY, CLEAR_ON).catch((e) => console.error(`${TAG} reset queue failed`, e));
+      store?.setItem(CLEAR_KEY, CLEAR_ON);
       console.log(`${TAG} reset QUEUED — reload the save to clear induced demand (applied safely at load).`);
     } catch (e) {
       console.error(`${TAG} reset failed`, e);
@@ -107,23 +132,28 @@ if (!api) {
   function ensureReconcile(dd: DemandData): void {
     if (didReconcile) return;
     reconcileBaselines(dd, ledger);
+    applyPendingAccum(ledger); // restore persisted growth pressure now that baselines exist
     bumpSeq(dd);
+    // Restore any induced pops the save/sim dropped (see reconcileInducedPops). Must run AFTER
+    // reconcileBaselines/bumpSeq: baselines are then already fixed, so the pops we re-add here
+    // can't be mistaken for baseline demand. Idempotent — pops still present are left untouched.
+    const restored = reconcileInducedPops(dd, ledger, DEFAULT_CONFIG);
+    if (restored > 0) console.log(`${TAG} restored ${restored} induced pops missing from the save`);
     didReconcile = true;
   }
 
-  async function init(): Promise<void> {
+  function init(): void {
     try {
       didReconcile = false;
-      // Storage is only honoured during the SYNCHRONOUS part of a mod callback, so ISSUE every
-      // storage call here before any await, then await the returned promises.
-      const ledgerPromise = loadLedger(storage, key());
-      const clearPromise = storage.get<string>(CLEAR_KEY, '');
-      void storage.set(CLEAR_KEY, '').catch(() => {}); // consume the marker every load (overwrite; delete proved unreliable)
+      const city = key();
+      // localStorage is synchronous and cold-start-hydrated, so this load actually returns the
+      // persisted roster (unlike api.storage). Load the ledger for the CURRENT city and remember
+      // which city it belongs to, so a save can never write it under the wrong (e.g. 'unknown') key.
+      ledger = store ? loadFromStore(store, LEDGER_KEY(city)) : newLedger();
+      ledgerCity = city;
+      const pendingClear = store?.getItem(CLEAR_KEY) === CLEAR_ON;
+      if (pendingClear) store?.removeItem(CLEAR_KEY); // consume once
 
-      // Require the EXACT queued value, not just truthiness — storage can return odd values
-      // (e.g. objects) for a key, and `!!` on those wrongly fired the clear on every load.
-      const pendingClear = (await clearPromise) === CLEAR_ON;
-      ledger = await ledgerPromise;
       const dd = api.gameState.getDemandData();
       if (dd && pendingClear) {
         // Apply a queued "Clear induced demand" now — before the simulation builds movements for
@@ -133,6 +163,7 @@ if (!api) {
           if (id.startsWith(INDUCED_PREFIX) && removeInducedPop(dd, id, DEFAULT_CONFIG)) removed++;
         }
         ledger = newLedger();
+        if (store) saveToStore(store, LEDGER_KEY(city), ledger); // persist the cleared state immediately
         console.log(`${TAG} CLEAR applied on load: removed ${removed} induced pops; ledger reset.`);
       }
       if (dd) { ensureReconcile(dd); captureBaselines(dd, ledger); }
@@ -170,8 +201,8 @@ if (!api) {
   // proactively below when the game is already loaded (mod hot-reload — see note at the bottom).
   function setup(): void {
     if (!isCurrent()) return;
-    if (!overlayRegistered) {
-      overlayRegistered = true;
+    if (!persistentUi.registered) {
+      persistentUi.registered = true;
       try {
         registerOverlay(api);
         api.ui.addToolbarPanel({
@@ -235,9 +266,14 @@ if (!api) {
     if (overlayStore.get().enabled) refreshOverlay();
   });
 
-  api.hooks.onGameSaved(async () => {
-    if (!isCurrent()) return;
-    try { await saveLedger(storage, key(), ledger); } catch (e) { console.error(`${TAG} save failed`, e); }
+  api.hooks.onGameSaved(() => {
+    if (!isCurrent() || !store) return;
+    const city = key();
+    // Only persist the ledger we actually loaded for THIS city. Guards the early-load race where
+    // init ran before the city code was available (city 'unknown', empty ledger): without this, an
+    // autosave could write that empty ledger over a real city's saved roster.
+    if (city === 'unknown' || city !== ledgerCity) return;
+    saveToStore(store, LEDGER_KEY(city), ledger);
   });
 
   // Mod hot-reload safety: on "Reload all mods" this script re-runs, but onMapReady/onGameLoaded

@@ -1,6 +1,6 @@
 import type { DemandData } from '../types/game-state';
 import type { InducedDemandConfig } from './config';
-import { INDUCED_PREFIX, isInduced, addInducedPop } from './popFactory';
+import { INDUCED_PREFIX, isInduced, addInducedPop, removeInducedPop, finalizeDeferredRemovals } from './popFactory';
 
 export interface PointLedger {
   baselineResidents: number;
@@ -26,6 +26,13 @@ export interface LedgerState {
   pops: Record<string, InducedPopRecord>;
   /** Monotonic counter for induced pop ids. */
   seq: number;
+  /**
+   * Induced pop ids queued for removal. Decay schedules removals here instead of
+   * deleting from live demand data mid-simulation — the game keeps in-flight train
+   * movements that reference pops by id, and deleting one throws every tick.
+   * Applied safely at load via `applyPendingRemovals` (see main.ts).
+   */
+  pendingRemovals?: string[];
   /**
    * Transient: growth accumulators loaded from the store, keyed by point id as `[res, job]`.
    * Applied by `applyPendingAccum` AFTER baselines are re-derived (baselines aren't persisted),
@@ -72,13 +79,23 @@ export function isPristineLedger(l: LedgerState): boolean {
  * A roster entry whose endpoints no longer exist is stale and gets pruned.
  * Returns the number of pops re-added to `dd`.
  */
+export function queueInducedPopRemoval(ledger: LedgerState, id: string): void {
+  if (!isInduced(id)) return;
+  if (!ledger.pendingRemovals) ledger.pendingRemovals = [];
+  if (!ledger.pendingRemovals.includes(id)) ledger.pendingRemovals.push(id);
+}
+
+export function isPendingRemoval(ledger: LedgerState, id: string): boolean {
+  return ledger.pendingRemovals?.includes(id) ?? false;
+}
+
 export function reconcileInducedPops(
   dd: DemandData,
   ledger: LedgerState,
   cfg: InducedDemandConfig,
 ): number {
   for (const pop of dd.popsMap.values()) {
-    if (isInduced(pop.id) && !ledger.pops[pop.id]) {
+    if (isInduced(pop.id) && !ledger.pops[pop.id] && !isPendingRemoval(ledger, pop.id)) {
       ledger.pops[pop.id] = { residenceId: pop.residenceId, jobId: pop.jobId };
     }
   }
@@ -141,7 +158,9 @@ export function serializeForStore(ledger: LedgerState): string {
   for (const [id, e] of Object.entries(ledger.points)) {
     if (e.resAccum !== 0 || e.jobAccum !== 0) accum[id] = [e.resAccum, e.jobAccum];
   }
-  return JSON.stringify({ seq: ledger.seq, pops: ledger.pops, accum });
+  const payload: Record<string, unknown> = { seq: ledger.seq, pops: ledger.pops, accum };
+  if (ledger.pendingRemovals?.length) payload.pendingRemovals = ledger.pendingRemovals;
+  return JSON.stringify(payload);
 }
 
 export function deserializeFromStore(s: string | null | undefined): LedgerState {
@@ -153,6 +172,7 @@ export function deserializeFromStore(s: string | null | undefined): LedgerState 
       pops: o.pops ?? {},
       seq: typeof o.seq === 'number' ? o.seq : 0,
     };
+    if (Array.isArray(o.pendingRemovals)) led.pendingRemovals = o.pendingRemovals;
     if (o.accum && typeof o.accum === 'object') led.pendingAccum = o.accum;
     return led;
   } catch {
@@ -173,6 +193,27 @@ export function applyPendingAccum(ledger: LedgerState): void {
     if (e) { e.resAccum = res; e.jobAccum = job; }
   }
   delete ledger.pendingAccum;
+}
+
+/**
+ * Delete every pop queued in `ledger.pendingRemovals`. Safe only before the
+ * simulation builds movements for the session (see main.ts init).
+ */
+export function applyPendingRemovals(
+  dd: DemandData,
+  ledger: LedgerState,
+  cfg: InducedDemandConfig,
+): number {
+  const pending = ledger.pendingRemovals;
+  if (!pending?.length) return 0;
+  let removed = 0;
+  for (const id of pending) {
+    if (dd.popsMap.has(id)) removed += finalizeDeferredRemovals(dd, [id]);
+    else if (removeInducedPop(dd, id, cfg)) removed++;
+    delete ledger.pops[id];
+  }
+  delete ledger.pendingRemovals;
+  return removed;
 }
 
 export function loadFromStore(store: KVStore, key: string): LedgerState {

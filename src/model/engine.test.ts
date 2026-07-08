@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runDay } from './engine';
-import { newLedger, captureBaselines, type LedgerState } from './ledger';
+import { newLedger, captureBaselines, applyPendingRemovals, type LedgerState } from './ledger';
 import { isInduced } from './popFactory';
 import { makeRng } from './gravity';
 import { DEFAULT_CONFIG, type InducedDemandConfig } from './config';
@@ -26,14 +26,22 @@ function world(): DemandData {
 
 const cfg: InducedDemandConfig = { ...DEFAULT_CONFIG, R_GROW: 0.05, R_DECAY: 0.02 };
 
-function inducedResidentsAt(dd: DemandData, id: string): number {
+function inducedResidentsAt(dd: DemandData, ledger: LedgerState, id: string): number {
   let n = 0;
-  for (const pop of dd.popsMap.values()) if (isInduced(pop.id) && pop.residenceId === id) n += pop.size;
+  for (const pop of dd.popsMap.values()) {
+    if (!isInduced(pop.id) || pop.residenceId !== id) continue;
+    if (ledger.pendingRemovals?.includes(pop.id)) continue;
+    n += pop.size;
+  }
   return n;
 }
-function inducedJobsAt(dd: DemandData, id: string): number {
+function inducedJobsAt(dd: DemandData, ledger: LedgerState, id: string): number {
   let n = 0;
-  for (const pop of dd.popsMap.values()) if (isInduced(pop.id) && pop.jobId === id) n += pop.size;
+  for (const pop of dd.popsMap.values()) {
+    if (!isInduced(pop.id) || pop.jobId !== id) continue;
+    if (ledger.pendingRemovals?.includes(pop.id)) continue;
+    n += pop.size;
+  }
   return n;
 }
 
@@ -49,8 +57,8 @@ test('engine grows residents at served home points and jobs at served job points
   assert.equal(dd.points.get('W')!.jobs, 600);
   assert.equal(dd.points.get('Z')!.residents, 400);
   assert.equal(dd.points.get('Z')!.jobs, 400);
-  assert.equal(dd.points.get('H')!.residents - led.points['H'].baselineResidents, inducedResidentsAt(dd, 'H'));
-  assert.equal(dd.points.get('W')!.jobs - led.points['W'].baselineJobs, inducedJobsAt(dd, 'W'));
+  assert.equal(dd.points.get('H')!.residents - led.points['H'].baselineResidents, inducedResidentsAt(dd, led, 'H'));
+  assert.equal(dd.points.get('W')!.jobs - led.points['W'].baselineJobs, inducedJobsAt(dd, led, 'W'));
   let totalResDelta = 0, totalJobDelta = 0;
   for (const p of dd.points.values()) {
     totalResDelta += p.residents - led.points[p.id].baselineResidents;
@@ -86,7 +94,25 @@ test('engine removes roster entries when it decays induced pops', () => {
   assert.ok(Object.keys(led.pops).length >= 1);
 
   for (let day = 0; day < 400; day++) runDay(dd, [], led, cfg, makeRng(1000 + day));
+  applyPendingRemovals(dd, led, cfg);
   assert.equal(Object.keys(led.pops).length, 0); // all decayed → roster empty
+});
+
+test('engine queues decay removals instead of deleting pops live', () => {
+  const dd = world();
+  const led: LedgerState = newLedger();
+  captureBaselines(dd, led);
+  const stations = [station('s', [0, 0], ['r1', 'r2', 'r3'])];
+  for (let day = 0; day < 400; day++) runDay(dd, stations, led, cfg, makeRng(day));
+  assert.equal(dd.points.get('H')!.residents, 600);
+
+  for (let day = 0; day < 400; day++) runDay(dd, [], led, cfg, makeRng(1000 + day));
+  assert.ok(led.pendingRemovals && led.pendingRemovals.length >= 1);
+  assert.equal(dd.points.get('H')!.residents, 400); // bookkeeping applied, popsMap kept
+  assert.ok([...dd.popsMap.keys()].some((id) => id.startsWith('induced:')));
+  applyPendingRemovals(dd, led, cfg);
+  assert.equal(dd.points.get('H')!.residents, 400);
+  assert.equal(led.pendingRemovals, undefined);
 });
 
 test('engine decays induced demand when the station is removed, never below baseline', () => {
@@ -98,6 +124,7 @@ test('engine decays induced demand when the station is removed, never below base
   assert.equal(dd.points.get('H')!.residents, 600);
 
   for (let day = 0; day < 400; day++) runDay(dd, [], led, cfg, makeRng(1000 + day));
+  applyPendingRemovals(dd, led, cfg);
   assert.equal(dd.points.get('H')!.residents, 400);
   assert.equal(dd.points.get('W')!.jobs, 400);
   for (const pop of dd.popsMap.values()) assert.equal(isInduced(pop.id), false);

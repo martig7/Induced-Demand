@@ -2,12 +2,13 @@ import type { DemandData, Station } from '../types/game-state';
 import type { Coordinate } from '../types/core';
 import type { InducedDemandConfig } from './config';
 import type { LedgerState } from './ledger';
+import { isPendingRemoval } from './ledger';
 import { access, type AccessStation } from './access';
 import { residentialScore, commercialScore } from './score';
 import { cap, logisticDelta } from './growth';
 import { reconcile, allocateInteger } from './allocate';
 import { pairByGravity } from './gravity';
-import { addInducedPop, removeInducedPop, INDUCED_PREFIX } from './popFactory';
+import { addInducedPop, INDUCED_PREFIX, deferInducedPopRemoval } from './popFactory';
 import { clamp } from './util';
 
 export interface DayResult {
@@ -70,6 +71,7 @@ export function runDay(
 
   // C. growth — net-equal, cap-respecting, gravity-paired
   let added = 0;
+  const addedThisDay = new Set<string>();
   const ids = points.map((p) => p.id);
   const resWeights = points.map((p) => Math.max(0, ledger.points[p.id].resAccum));
   const jobWeights = points.map((p) => Math.max(0, ledger.points[p.id].jobAccum));
@@ -90,6 +92,7 @@ export function runDay(
       if (addInducedPop(dd, h, w, id, cfg)) {
         ledger.pops[id] = { residenceId: h, jobId: w }; // track so a lost save can restore it
         ledger.seq++;
+        addedThisDay.add(id);
         ledger.points[h].resAccum = Math.max(0, ledger.points[h].resAccum - cfg.POP_SIZE);
         ledger.points[w].jobAccum = Math.max(0, ledger.points[w].jobAccum - cfg.POP_SIZE);
         added++;
@@ -97,23 +100,23 @@ export function runDay(
     }
   }
 
-  // D. decay (rare) — gradual removal of induced pops while accumulator is below −POP_SIZE
+  // D. decay (rare) — queue induced pops for removal while accumulator is below −POP_SIZE.
+  // Never delete from live demand data here: the game may still have in-flight movements
+  // referencing the pop id (see main.ts applyPendingRemovals on load).
   let removed = 0;
   for (const p of points) {
     const e = ledger.points[p.id]; // always initialised in section A above
     while (e.resAccum <= -cfg.POP_SIZE) {
-      const id = findInduced(dd, p.id, 'residence');
+      const id = findInduced(dd, ledger, p.id, 'residence', addedThisDay);
       if (!id) { e.resAccum = -cfg.POP_SIZE + 1; break; }
-      removeInducedPop(dd, id, cfg);
-      delete ledger.pops[id];
+      deferInducedPopRemoval(dd, ledger, id, cfg);
       e.resAccum += cfg.POP_SIZE;
       removed++;
     }
     while (e.jobAccum <= -cfg.POP_SIZE) {
-      const id = findInduced(dd, p.id, 'job');
+      const id = findInduced(dd, ledger, p.id, 'job', addedThisDay);
       if (!id) { e.jobAccum = -cfg.POP_SIZE + 1; break; }
-      removeInducedPop(dd, id, cfg);
-      delete ledger.pops[id];
+      deferInducedPopRemoval(dd, ledger, id, cfg);
       e.jobAccum += cfg.POP_SIZE;
       removed++;
     }
@@ -128,12 +131,20 @@ function expand(ids: string[], slots: number[]): string[] {
   return out;
 }
 
-function findInduced(dd: DemandData, pointId: string, side: 'residence' | 'job'): string | null {
+function findInduced(
+  dd: DemandData,
+  ledger: LedgerState,
+  pointId: string,
+  side: 'residence' | 'job',
+  exclude?: ReadonlySet<string>,
+): string | null {
   const p = dd.points.get(pointId);
   if (!p) return null;
   for (let i = p.popIds.length - 1; i >= 0; i--) {
     const id = p.popIds[i];
     if (!id.startsWith(INDUCED_PREFIX)) continue;
+    if (exclude?.has(id)) continue;
+    if (isPendingRemoval(ledger, id)) continue;
     const pop = dd.popsMap.get(id);
     if (!pop) continue;
     if (side === 'residence' && pop.residenceId === pointId) return id;

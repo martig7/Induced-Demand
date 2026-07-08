@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isInduced, addInducedPop, removeInducedPop } from './popFactory';
+import { isInduced, addInducedPop, removeInducedPop, deferredRemovalPopCount, countInducedPops } from './popFactory';
 import { DEFAULT_CONFIG } from './config';
 import type { DemandData, DemandPoint } from '../types/game-state';
 
@@ -53,4 +53,13 @@ test('removeInducedPop refuses non-induced ids', () => {
   const dd = demand();
   dd.popsMap.set('base-1', { id: 'base-1', size: 200, residenceId: 'H', jobId: 'W' } as never);
   assert.equal(removeInducedPop(dd, 'base-1', DEFAULT_CONFIG), false);
+});
+
+test('deferredRemovalPopCount uses pendingRemovals or all induced when clear is queued', () => {
+  const dd = demand();
+  addInducedPop(dd, 'H', 'W', 'induced:1', DEFAULT_CONFIG);
+  addInducedPop(dd, 'H', 'W', 'induced:2', DEFAULT_CONFIG);
+  assert.equal(countInducedPops(dd), 2);
+  assert.equal(deferredRemovalPopCount(dd, { pendingRemovals: ['induced:1'] }, false), 1);
+  assert.equal(deferredRemovalPopCount(dd, { pendingRemovals: ['induced:1'] }, true), 2);
 });

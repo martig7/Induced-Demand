@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import {
   newLedger, captureBaselines, reconcileBaselines, reconcileInducedPops, isPristineLedger,
   serializeForStore, deserializeFromStore, loadFromStore, saveToStore, applyPendingAccum,
-  type KVStore, type LedgerState,
+  queueInducedPopRemoval, applyPendingRemovals, type KVStore, type LedgerState,
 } from './ledger';
 import { DEFAULT_CONFIG } from './config';
+import { deferInducedPopRemoval } from './popFactory';
 import type { DemandData, DemandPoint, Pop } from '../types/game-state';
 
 /** In-memory localStorage-shaped store for tests. */
@@ -185,6 +186,48 @@ test('reconcileInducedPops prunes roster entries whose endpoints are gone', () =
   const restored = reconcileInducedPops(dd, led, DEFAULT_CONFIG);
   assert.equal(restored, 0);
   assert.equal(led.pops['induced:9'], undefined); // stale entry dropped
+});
+
+test('serializeForStore persists pending decay removals', () => {
+  const led = newLedger();
+  queueInducedPopRemoval(led, 'induced:3');
+  const back = deserializeFromStore(serializeForStore(led));
+  assert.deepEqual(back.pendingRemovals, ['induced:3']);
+});
+
+test('reconcileInducedPops does not re-adopt pops queued for removal', () => {
+  const pop: Pop = { id: 'induced:5', size: 200, residenceId: 'p', jobId: 'p' } as Pop;
+  const dd: DemandData = {
+    points: new Map([['p', point('p', 600, 200, ['induced:5'])]]),
+    popsMap: new Map([['induced:5', pop]]),
+  };
+  const led = newLedger();
+  queueInducedPopRemoval(led, 'induced:5');
+  reconcileInducedPops(dd, led, DEFAULT_CONFIG);
+  assert.equal(led.pops['induced:5'], undefined);
+});
+
+test('applyPendingRemovals deletes queued pops and clears the queue', () => {
+  const pop: Pop = { id: 'induced:1', size: 200, residenceId: 'p', jobId: 'q' } as Pop;
+  const dd: DemandData = {
+    points: new Map([
+      ['p', point('p', 600, 100, ['induced:1'])],
+      ['q', point('q', 100, 500, ['induced:1'])],
+    ]),
+    popsMap: new Map([['induced:1', pop]]),
+  };
+  const led = newLedger();
+  led.pops['induced:1'] = { residenceId: 'p', jobId: 'q' };
+  deferInducedPopRemoval(dd, led, 'induced:1', DEFAULT_CONFIG);
+  assert.equal(dd.points.get('p')!.residents, 400);
+  assert.equal(dd.points.get('q')!.jobs, 300);
+  assert.ok(dd.popsMap.has('induced:1'));
+
+  const removed = applyPendingRemovals(dd, led, DEFAULT_CONFIG);
+  assert.equal(removed, 1);
+  assert.equal(dd.popsMap.has('induced:1'), false);
+  assert.equal(led.pendingRemovals, undefined);
+  assert.equal(led.pops['induced:1'], undefined);
 });
 
 test('saveToStore swallows quota/errors so a full store never crashes the mod', () => {

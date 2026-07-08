@@ -170,6 +170,10 @@ write via in-place mutation as above.
   affected catchments.
 - `hooks.onCityLoad(code => …)` / `onMapReady(map => …)` — init.
 
+Toolbar panels, `reloadMods()`, and save-reload hook behavior are documented in
+[`MODDING_UI.md`](MODDING_UI.md) (unregister-before-add pattern; `addToolbarPanel`
+does not dedupe by id).
+
 ## Re-deriving this later
 
 Helper scripts live in `scripts/` (dependency-free, Node only):

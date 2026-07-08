@@ -280,7 +280,11 @@ export interface ModdingAPI {
 
     /** Add a button to the main toolbar. */
     addToolbarButton(config: UIToolbarButtonOptions): void;
-    /** Add a panel to the main toolbar. */
+    /**
+     * Add a panel to the main toolbar (`top-bar`).
+     * Always appends — does not replace an existing panel with the same `id`.
+     * Call `unregisterComponent('top-bar', config.id)` first, or see `docs/MODDING_UI.md`.
+     */
     addToolbarPanel(config: UIToolbarPanelOptions): void;
 
     // -- Floating panels --

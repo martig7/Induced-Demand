@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { createOverlayStore } from './state';
 
 test('store merges patches and notifies subscribers', () => {
-  const store = createOverlayStore({ enabled: false, view: 'realized', metric: 'combined' });
+  const store = createOverlayStore({
+    enabled: false, view: 'realized', metric: 'combined', revision: 0,
+    deferredRemovalCount: 0, clearQueued: false,
+  });
   let n = 0;
   const unsub = store.subscribe(() => { n++; });
 

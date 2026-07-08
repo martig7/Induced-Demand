@@ -4,6 +4,12 @@ export interface OverlayState {
   enabled: boolean;
   view: OverlayView;
   metric: OverlayMetric;
+  /** Bumped to re-render panel chrome. */
+  revision: number;
+  /** Induced pops still in the sim but queued to drop on the next save reload. */
+  deferredRemovalCount: number;
+  /** "Clear induced demand" was clicked; reload will wipe all induced pops. */
+  clearQueued: boolean;
 }
 
 export interface OverlayStore {

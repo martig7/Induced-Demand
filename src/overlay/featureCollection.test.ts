@@ -59,6 +59,23 @@ test('realized ignores non-induced (base) pops', () => {
   assert.equal(fc.maxValue, 0);
 });
 
+test('realized still counts pops queued for deferred removal', () => {
+  const dd: DemandData = {
+    points: new Map([
+      ['H', pt('H', [0, 0], 400, 0, 0, 0)],
+      ['W', pt('W', [0, 0.001], 0, 400, 0, 0)],
+    ]),
+    popsMap: new Map([
+      ['induced:0', inducedPop('induced:0', 'H', 'W')],
+      ['induced:1', inducedPop('induced:1', 'H', 'W')],
+    ]),
+  };
+  const fc = buildOverlay(dd, [], 'realized', 'combined', DEFAULT_CONFIG);
+  const byId = Object.fromEntries(fc.features.map((f) => [f.properties.id, f.properties.value]));
+  assert.equal(byId['H'], 400);
+  assert.equal(byId['W'], 400);
+});
+
 test('targeting uses the model score (point at a served station)', () => {
   const dd: DemandData = { points: new Map([['H', pt('H', [0, 0], 400, 0, 50, 0)]]), popsMap: new Map() };
   const fc = buildOverlay(dd, [station([0, 0], ['r1', 'r2', 'r3'])], 'targeting', 'residential', DEFAULT_CONFIG);

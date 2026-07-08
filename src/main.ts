@@ -6,15 +6,16 @@ import type { DemandData, Station } from './types/game-state';
 import { runDay } from './model/engine';
 import { DEFAULT_CONFIG } from './model/config';
 import { makeRng } from './model/gravity';
-import { INDUCED_PREFIX, removeInducedPop } from './model/popFactory';
+import { INDUCED_PREFIX, removeInducedPop, deferredRemovalPopCount } from './model/popFactory';
 import {
   loadFromStore, saveToStore, captureBaselines, reconcileBaselines, reconcileInducedPops,
-  applyPendingAccum, newLedger, type LedgerState, type KVStore,
+  applyPendingAccum, applyPendingRemovals, newLedger, type LedgerState, type KVStore,
 } from './model/ledger';
 import { buildOverlay } from './overlay/featureCollection';
 import { registerOverlay, updateOverlay, setOverlayVisible } from './overlay/overlay';
 import { createOverlayStore, type OverlayStore } from './overlay/state';
 import { createPanel } from './ui/panel';
+import { TOOLBAR_PANEL_ID, TOOLBAR_PLACEMENT } from './ui/toolbarPanel';
 
 const TAG = '[InducedDemand]';
 const DEBUG = true; // verbose per-day heartbeat while verifying; set false to quiet
@@ -31,26 +32,73 @@ if (!api) {
   let didReconcile = false;
   let loggedSample = false;
 
-  // Cross-reload UI state, persisted on `window` like `myGen` below: "Reload all mods" re-executes
-  // this whole script, but `api.ui.addToolbarPanel` has no id-based de-dupe — it just pushes onto an
-  // array — so calling it again on every reload stacked a 2nd (3rd, ...) inert-but-visible icon
-  // forever. Register the panel/overlay AT MOST ONCE per app session (module-local `registered` would
-  // reset on every reload; this doesn't), and share the SAME overlayStore object across reloads too —
-  // the panel added on session 1 is the only one that's ever shown, and because later generations'
-  // fresh onDayChange hooks read/subscribe to that SAME store (not a fresh disabled-by-default one),
-  // toggling the (permanently gen-1-bound) panel still drives every later generation's auto-refresh.
-  interface PersistentUi { registered: boolean; overlayStore: OverlayStore }
+  // Cross-reload UI state on `window`: the game's toolbar is rebuilt on save reload and
+  // `reloadMods()` clears mod UI, but this object survives — use it to re-register the
+  // panel without stacking duplicates on every hook fire in the same turn.
+  interface PersistentUi {
+    overlayStore: OverlayStore;
+    resetInducedDemand?: () => void;
+    mapReady?: boolean;
+    renderPanel?: () => unknown;
+  }
   const UI_KEY = '__inducedDemandUi__';
   const wUi = window as unknown as Record<string, PersistentUi>;
   if (!wUi[UI_KEY]) {
     wUi[UI_KEY] = {
-      registered: false,
-      overlayStore: createOverlayStore({ enabled: false, view: 'realized', metric: 'combined' }),
+      overlayStore: createOverlayStore({
+        enabled: false,
+        view: 'realized',
+        metric: 'combined',
+        revision: 0,
+        deferredRemovalCount: 0,
+        clearQueued: false,
+      }),
     };
   }
   const persistentUi = wUi[UI_KEY];
   const overlayStore = persistentUi.overlayStore;
+  const panelState = overlayStore.get();
+  if (typeof panelState.revision !== 'number') overlayStore.set({ revision: 0 });
+  if (typeof panelState.deferredRemovalCount !== 'number') overlayStore.set({ deferredRemovalCount: 0 });
+  if (typeof panelState.clearQueued !== 'boolean') overlayStore.set({ clearQueued: false });
   let lastMax = 0;
+
+  // Guard against duplicate execution: the mod loader may run this script more than
+  // once (e.g. initial load + "Reload all mods"), leaving stale hook callbacks
+  // registered. Each execution claims a generation; callbacks from any but the latest
+  // generation no-op, so exactly one instance is ever active (newest wins; hot-reload-safe).
+  const GEN_KEY = '__inducedDemandGeneration__';
+  const w = window as unknown as Record<string, number>;
+  const myGen = (w[GEN_KEY] = (w[GEN_KEY] ?? 0) + 1);
+  const isCurrent = (): boolean => w[GEN_KEY] === myGen;
+
+  // Persist through localStorage, NOT api.storage:
+  // does NOT rehydrate from disk on a cold launch, so api.storage.get returns nothing after a full
+  // restart (it survived only warm, in-session reloads). localStorage IS hydrated by Electron on
+  // cold start, so the roster actually round-trips. (Same approach as the Improved Schematics mod.)
+  const store: KVStore | null = (() => {
+    try { return window.localStorage; } catch { return null; }
+  })();
+  const LEDGER_KEY = (city: string): string => `induceddemand:ledger:${city}`;
+  // Clear-demand marker: set on click, applied + cleared on the next load. Kept as its own key.
+  const CLEAR_KEY = 'induceddemand:clear';
+  const CLEAR_ON = '1';
+
+  const isClearQueued = (): boolean => store?.getItem(CLEAR_KEY) === CLEAR_ON;
+
+  function syncPanelState(): void {
+    const dd = api.gameState.getDemandData();
+    const clearQueued = isClearQueued();
+    const deferredRemovalCount = dd
+      ? deferredRemovalPopCount(dd, ledger, clearQueued)
+      : 0;
+    const s = overlayStore.get();
+    overlayStore.set({
+      deferredRemovalCount,
+      clearQueued,
+      revision: (s.revision ?? 0) + 1,
+    });
+  }
 
   function refreshOverlay(): void {
     if (!overlayStore.get().enabled) { setOverlayVisible(api, false); return; }
@@ -64,18 +112,6 @@ if (!api) {
   }
   overlayStore.subscribe(refreshOverlay);
 
-  // Persist through localStorage, NOT api.storage: the game's mod-storage keeps an in-memory map it
-  // does NOT rehydrate from disk on a cold launch, so api.storage.get returns nothing after a full
-  // restart (it survived only warm, in-session reloads). localStorage IS hydrated by Electron on
-  // cold start, so the roster actually round-trips. (Same approach as the Improved Schematics mod.)
-  const store: KVStore | null = (() => {
-    try { return window.localStorage; } catch { return null; }
-  })();
-  const LEDGER_KEY = (city: string): string => `induceddemand:ledger:${city}`;
-  // Clear-demand marker: set on click, applied + cleared on the next load. Kept as its own key.
-  const CLEAR_KEY = 'induceddemand:clear';
-  const CLEAR_ON = '1';
-
   /**
    * "Clear induced demand" — queue a reset applied on the NEXT load. We can't delete pops in a
    * running sim (the game holds in-flight train/journey movements that reference them by id, which
@@ -85,22 +121,59 @@ if (!api) {
   function resetInducedDemand(): void {
     try {
       store?.setItem(CLEAR_KEY, CLEAR_ON);
+      syncPanelState();
       console.log(`${TAG} reset QUEUED — reload the save to clear induced demand (applied safely at load).`);
     } catch (e) {
       console.error(`${TAG} reset failed`, e);
     }
   }
 
-  // Guard against duplicate execution: the mod loader may run this script more than
-  // once (e.g. initial load + "Reload all mods"), leaving stale hook callbacks
-  // registered. Each execution claims a generation; callbacks from any but the latest
-  // generation no-op, so exactly one instance is ever active (newest wins; hot-reload-safe).
-  const GEN_KEY = '__inducedDemandGeneration__';
-  const w = window as unknown as Record<string, number>;
-  const myGen = (w[GEN_KEY] = (w[GEN_KEY] ?? 0) + 1);
-  const isCurrent = (): boolean => w[GEN_KEY] === myGen;
+  function refreshPanelRender(): void {
+    persistentUi.renderPanel = createPanel(
+      api,
+      overlayStore,
+      () => lastMax,
+      () => persistentUi.resetInducedDemand?.(),
+    );
+  }
 
-  // Identity is read LIVE: onCityLoad/onGameInit may be skipped or fire out of order
+  function registerToolbarPanel(): void {
+    refreshPanelRender();
+    registerOverlay(api);
+    api.ui.addToolbarPanel({
+      id: TOOLBAR_PANEL_ID,
+      icon: 'TrendingUp',
+      tooltip: 'Induced Demand',
+      title: 'Induced Demand',
+      width: 260,
+      // Delegate to the latest render so any surviving toolbar entry stays live after mod reload.
+      render: () => persistentUi.renderPanel?.(),
+    });
+  }
+
+  function registerToolbarPanelNow(): void {
+    try {
+      registerToolbarPanel();
+    } catch (e) {
+      console.error(`${TAG} overlay/panel registration failed`, e);
+    }
+  }
+
+  function ensureToolbarPanel(): void {
+    if (!isCurrent()) return;
+    // addToolbarPanel always pushes; unregister first (same pattern as addFloatingPanel).
+    try {
+      api.ui.unregisterComponent(TOOLBAR_PLACEMENT, TOOLBAR_PANEL_ID);
+    } catch (e) {
+      console.error(`${TAG} toolbar unregister failed`, e);
+    }
+    registerToolbarPanelNow();
+  }
+
+  persistentUi.resetInducedDemand = resetInducedDemand;
+  refreshPanelRender();
+
+  // Identity is read LIVE:
   // for save-loaded sessions, so cached values can't be trusted for the storage key.
   const currentCity = (): string => {
     try { return api.utils.getCityCode?.() || cachedCity; } catch { return cachedCity; }
@@ -166,9 +239,16 @@ if (!api) {
         if (store) saveToStore(store, LEDGER_KEY(city), ledger); // persist the cleared state immediately
         console.log(`${TAG} CLEAR applied on load: removed ${removed} induced pops; ledger reset.`);
       }
+      if (dd) {
+        const decayRemoved = applyPendingRemovals(dd, ledger, DEFAULT_CONFIG);
+        if (decayRemoved > 0) {
+          console.log(`${TAG} applied ${decayRemoved} queued decay removal(s) on load.`);
+        }
+      }
       if (dd) { ensureReconcile(dd); captureBaselines(dd, ledger); }
       ready = true;
       refreshOverlay();
+      syncPanelState();
       const pts = dd ? dd.points.size : 0;
       const stations = api.gameState.getStations().length;
       console.log(`${TAG} ready for ${key()} — ${pts} demand points, ${stations} stations`);
@@ -197,32 +277,26 @@ if (!api) {
     }
   }
 
-  // Register the overlay/panel (once) and initialize. Driven by onMapReady, and also called
-  // proactively below when the game is already loaded (mod hot-reload — see note at the bottom).
+  // Toolbar: reloadMods clears uiComponents then re-fires onMapReady; save reload only fires onGameLoaded.
   function setup(): void {
     if (!isCurrent()) return;
-    if (!persistentUi.registered) {
-      persistentUi.registered = true;
-      try {
-        registerOverlay(api);
-        api.ui.addToolbarPanel({
-          id: 'induced-demand-map-mode',
-          icon: 'TrendingUp',
-          tooltip: 'Induced Demand',
-          title: 'Induced Demand',
-          width: 260,
-          render: createPanel(api, overlayStore, () => lastMax, resetInducedDemand),
-        });
-      } catch (e) {
-        console.error(`${TAG} overlay/panel registration failed`, e);
-      }
-    }
+    persistentUi.mapReady = true;
+    ensureToolbarPanel();
     void init();
   }
 
-  api.hooks.onCityLoad((code) => { if (!isCurrent()) return; cachedCity = code; didReconcile = false; loggedSample = false; });
+  api.hooks.onCityLoad((code) => {
+    if (!isCurrent()) return;
+    cachedCity = code;
+    didReconcile = false;
+    loggedSample = false;
+  });
   api.hooks.onMapReady(setup);
-  api.hooks.onGameLoaded(() => { if (!isCurrent()) return; void init(); });
+  api.hooks.onGameLoaded(() => {
+    if (!isCurrent()) return;
+    void init();
+    ensureToolbarPanel();
+  });
 
   api.hooks.onDayChange((day) => {
     if (!isCurrent()) return;
@@ -264,6 +338,7 @@ if (!api) {
       console.log(`${TAG} day ${day}: +${result.added} -${result.removed} pops`);
     }
     if (overlayStore.get().enabled) refreshOverlay();
+    syncPanelState();
   });
 
   api.hooks.onGameSaved(() => {
@@ -276,10 +351,8 @@ if (!api) {
     saveToStore(store, LEDGER_KEY(city), ledger);
   });
 
-  // Mod hot-reload safety: on "Reload all mods" this script re-runs, but onMapReady/onGameLoaded
-  // won't fire again for an already-loaded game — so the fresh instance would never become `ready`
-  // and would stop triggering growth. If demand data is already available, set up right now.
+  // Mod hot-reload: script re-runs; triggerPostReloadLifecycle re-fires hooks (no proactive register).
   try {
-    if (api.gameState.getDemandData()) setup();
+    if (api.gameState.getDemandData()) void init();
   } catch { /* game not loaded yet — the hooks will fire normally */ }
 }

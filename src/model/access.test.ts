@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, type AccessStation } from './access';
+import { access, toAccessStations, type AccessStation } from './access';
 import { DEFAULT_CONFIG } from './config';
 import type { Coordinate } from '../types/core';
 
@@ -24,4 +24,18 @@ test('access: single-line on-point station uses the connectivity floor', () => {
   const s: AccessStation = { coords: [0, 0], lineIds: ['r1'] };
   // walkProx=1; connectivity=1/3; access = 0.5 + 0.5*(1/3)
   assert.ok(Math.abs(access(P, [s], DEFAULT_CONFIG) - (0.5 + 0.5 / 3)) < 1e-9);
+});
+
+test('access: zero when the only nearby station has no routes', () => {
+  const s: AccessStation = { coords: [0, 0], lineIds: [] };
+  assert.equal(access(P, [s], DEFAULT_CONFIG), 0);
+});
+
+test('toAccessStations drops stations with empty routeIds', () => {
+  const out = toAccessStations([
+    { coords: [0, 0], routeIds: [] },
+    { coords: [0, 0.001], routeIds: ['r1'] },
+  ]);
+  assert.equal(out.length, 1);
+  assert.deepEqual(out[0].lineIds, ['r1']);
 });

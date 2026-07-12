@@ -1,6 +1,6 @@
 import type { DemandData, Station } from '../types/game-state';
 import type { InducedDemandConfig } from '../model/config';
-import { access, type AccessStation } from '../model/access';
+import { access, toAccessStations } from '../model/access';
 import { residentialScore, commercialScore } from '../model/score';
 import { INDUCED_PREFIX } from '../model/popFactory';
 import type { OverlayView, OverlayMetric, OverlayFeature, OverlayFeatureCollection } from './types';
@@ -30,7 +30,7 @@ export function buildOverlay(
     }
   }
 
-  const accessStations: AccessStation[] = stations.map((s) => ({ coords: s.coords, lineIds: s.routeIds ?? [] }));
+  const accessStations = toAccessStations(stations);
   const features: OverlayFeature[] = [];
   let maxValue = 0;
 

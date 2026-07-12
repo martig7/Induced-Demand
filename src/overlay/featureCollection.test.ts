@@ -84,6 +84,12 @@ test('targeting uses the model score (point at a served station)', () => {
   assert.ok(Math.abs(fc.features[0].properties.value - 0.75) < 1e-6);
 });
 
+test('targeting ignores stations with no routes', () => {
+  const dd: DemandData = { points: new Map([['H', pt('H', [0, 0], 400, 0, 50, 0)]]), popsMap: new Map() };
+  const fc = buildOverlay(dd, [station([0, 0], [])], 'targeting', 'residential', DEFAULT_CONFIG);
+  assert.equal(fc.features.length, 0);
+});
+
 test('normalization sets t = value / maxValue across points', () => {
   const dd: DemandData = {
     points: new Map([

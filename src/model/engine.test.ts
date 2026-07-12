@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runDay } from './engine';
-import { newLedger, captureBaselines, applyPendingRemovals, type LedgerState } from './ledger';
+import { newLedger, captureBaselines, retirePendingRemovals, type LedgerState } from './ledger';
 import { isInduced } from './popFactory';
 import { makeRng } from './gravity';
 import { DEFAULT_CONFIG, type InducedDemandConfig } from './config';
@@ -65,8 +65,25 @@ test('engine grows residents at served home points and jobs at served job points
     totalJobDelta += p.jobs - led.points[p.id].baselineJobs;
   }
   assert.equal(totalResDelta, totalJobDelta);
-  for (const pop of dd.popsMap.values()) if (isInduced(pop.id)) assert.equal(pop.size, 200);
+  for (const pop of dd.popsMap.values()) {
+    if (!isInduced(pop.id)) continue;
+    // Live pops are full 200-person groups; decay-deferred ones are inert (size 0).
+    assert.equal(pop.size, led.pendingRemovals?.includes(pop.id) ? 0 : 200);
+  }
   assert.ok(added >= 1);
+});
+
+test('engine ignores stations with no routes (track-only infrastructure)', () => {
+  const dd = world();
+  const led: LedgerState = newLedger();
+  captureBaselines(dd, led);
+  const stations = [station('s', [0, 0], [])];
+  let added = 0;
+  for (let day = 0; day < 400; day++) added += runDay(dd, stations, led, cfg, makeRng(day)).added;
+
+  assert.equal(added, 0);
+  assert.equal(dd.points.get('H')!.residents, 400);
+  assert.equal(dd.points.get('W')!.jobs, 400);
 });
 
 test('engine records every induced pop it creates in the ledger roster', () => {
@@ -94,7 +111,7 @@ test('engine removes roster entries when it decays induced pops', () => {
   assert.ok(Object.keys(led.pops).length >= 1);
 
   for (let day = 0; day < 400; day++) runDay(dd, [], led, cfg, makeRng(1000 + day));
-  applyPendingRemovals(dd, led, cfg);
+  retirePendingRemovals(dd, led, cfg);
   assert.equal(Object.keys(led.pops).length, 0); // all decayed → roster empty
 });
 
@@ -110,7 +127,7 @@ test('engine queues decay removals instead of deleting pops live', () => {
   assert.ok(led.pendingRemovals && led.pendingRemovals.length >= 1);
   assert.equal(dd.points.get('H')!.residents, 400); // bookkeeping applied, popsMap kept
   assert.ok([...dd.popsMap.keys()].some((id) => id.startsWith('induced:')));
-  applyPendingRemovals(dd, led, cfg);
+  retirePendingRemovals(dd, led, cfg);
   assert.equal(dd.points.get('H')!.residents, 400);
   assert.equal(led.pendingRemovals, undefined);
 });
@@ -124,8 +141,49 @@ test('engine decays induced demand when the station is removed, never below base
   assert.equal(dd.points.get('H')!.residents, 600);
 
   for (let day = 0; day < 400; day++) runDay(dd, [], led, cfg, makeRng(1000 + day));
-  applyPendingRemovals(dd, led, cfg);
+  retirePendingRemovals(dd, led, cfg);
   assert.equal(dd.points.get('H')!.residents, 400);
   assert.equal(dd.points.get('W')!.jobs, 400);
-  for (const pop of dd.popsMap.values()) assert.equal(isInduced(pop.id), false);
+  // Retired pops stay in popsMap as demand-neutral tombstone stubs (deleting them
+  // would orphan in-flight movements); every remaining induced entry must be one.
+  for (const pop of dd.popsMap.values()) {
+    if (isInduced(pop.id)) assert.ok(led.tombstones?.[pop.id]);
+  }
+});
+
+test('runDay reports per-point deltas for the history view', () => {
+  const dd = world();
+  const led: LedgerState = newLedger();
+  captureBaselines(dd, led);
+  const stations = [station('s', [0, 0], ['r1', 'r2', 'r3'])];
+  let ar = 0, aj = 0, addedTotal = 0;
+  for (let day = 0; day < 400; day++) {
+    const r = runDay(dd, stations, led, cfg, makeRng(day));
+    addedTotal += r.added;
+    for (const d of Object.values(r.deltas)) { ar += d.ar; aj += d.aj; }
+  }
+  // Every added pop counts once at its home point (ar) and once at its work point (aj).
+  assert.equal(ar, addedTotal);
+  assert.equal(aj, addedTotal);
+  assert.ok(addedTotal > 0);
+
+  // Decay: removals are attributed to BOTH endpoints of the removed pop.
+  let rr = 0, rj = 0, removedTotal = 0;
+  for (let day = 0; day < 400; day++) {
+    const r = runDay(dd, [], led, cfg, makeRng(1000 + day));
+    removedTotal += r.removed;
+    for (const d of Object.values(r.deltas)) { rr += d.rr; rj += d.rj; }
+  }
+  assert.equal(rr, removedTotal);
+  assert.equal(rj, removedTotal);
+  assert.ok(removedTotal > 0);
+});
+
+test('runDay deltas contain only touched points', () => {
+  const dd = world();
+  const led: LedgerState = newLedger();
+  captureBaselines(dd, led);
+  const r = runDay(dd, [], led, cfg, makeRng(7)); // no stations → no growth anywhere
+  assert.equal(r.added, 0);
+  assert.deepEqual(r.deltas, {});
 });

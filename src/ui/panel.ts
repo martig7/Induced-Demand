@@ -12,17 +12,14 @@ export function unitsLabel(view: OverlayView): string {
  * (no JSX). The returned component re-renders when the store changes.
  * `getMax()` returns the most recent FeatureCollection's maxValue for the legend.
  */
-export function deferredRemovalLabel(count: number): string | null {
-  if (count <= 0) return null;
-  const noun = count === 1 ? 'pop' : 'pops';
-  return `${count} ${noun} deferred for removal on save reload`;
-}
-
 export function createPanel(
   api: ModdingAPI,
   store: OverlayStore,
   getMax: () => number,
   onReset: () => void = () => {},
+  // Rendered inline below the History button when `historyOpen` (the game's
+  // addFloatingPanel only adds a collapsed top-bar icon — see docs/MODDING_UI.md).
+  HistorySection: (() => unknown) | null = null,
 ): () => unknown {
   const React = api.utils.React as unknown as {
     createElement: (type: unknown, props?: unknown, ...children: unknown[]) => unknown;
@@ -69,7 +66,6 @@ export function createPanel(
       h('div', { style: { fontSize: '11px', opacity: 0.7, marginTop: '2px' } }, unitsLabel(s.view)));
 
     const clearQueued = s.clearQueued;
-    const deferredLabel = deferredRemovalLabel(s.deferredRemovalCount);
     const RESET_RED = '#c0392b';
     const resetBtn = h('button', {
       onClick: () => {
@@ -87,12 +83,22 @@ export function createPanel(
         border: '1px solid ' + RESET_RED, background: confirming ? RESET_RED : 'transparent',
         color: confirming ? '#fff' : 'inherit', fontSize: '12px',
       },
-    }, clearQueued ? '↻ Reload to clear induced demand' : confirming ? 'Click again to confirm' : 'Clear induced demand');
+    }, clearQueued ? '↻ Clear queued — applies on next full load' : confirming ? 'Click again to confirm' : 'Clear induced demand');
 
-    const deferredNote = deferredLabel
-      ? h('div', {
-        style: { marginTop: '6px', fontSize: '11px', opacity: 0.75, lineHeight: 1.35 },
-      }, deferredLabel)
+    const historyActive = s.historyDay != null;
+    const historyOpen = !!s.historyOpen;
+    const historyBtn = h('button', {
+      onClick: () => store.set({ historyOpen: !historyOpen }),
+      style: {
+        marginTop: '10px', width: '100%', padding: '4px 8px', borderRadius: '4px',
+        cursor: 'pointer', border: '1px solid #8c96c6',
+        background: historyActive ? RAMP_MID : 'transparent',
+        color: historyActive ? '#fff' : 'inherit', fontSize: '12px',
+      },
+    }, `${historyOpen ? '▾' : '▸'} History`);
+
+    const historySection = historyOpen && HistorySection
+      ? h('div', { style: { marginTop: '6px' } }, h(HistorySection))
       : null;
 
     return h('div', { style: { padding: '8px', minWidth: '220px' } },
@@ -104,7 +110,8 @@ export function createPanel(
         seg('Both', s.metric === 'combined', () => setMetric('combined')),
       ]),
       legend,
-      resetBtn,
-      ...(deferredNote ? [deferredNote] : []));
+      historyBtn,
+      ...(historySection ? [historySection] : []),
+      resetBtn);
   };
 }

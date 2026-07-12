@@ -3,7 +3,7 @@ import type { Coordinate } from '../types/core';
 import type { InducedDemandConfig } from './config';
 import type { LedgerState } from './ledger';
 import { isPendingRemoval } from './ledger';
-import { access, type AccessStation } from './access';
+import { access, toAccessStations } from './access';
 import { residentialScore, commercialScore } from './score';
 import { cap, logisticDelta } from './growth';
 import { reconcile, allocateInteger } from './allocate';
@@ -11,9 +11,24 @@ import { pairByGravity } from './gravity';
 import { addInducedPop, INDUCED_PREFIX, deferInducedPopRemoval } from './popFactory';
 import { clamp } from './util';
 
+/** Per-point demand changes of one day: added/removed pops at residence/job side. */
+export interface DayDelta {
+  ar: number;
+  aj: number;
+  rr: number;
+  rj: number;
+}
+
 export interface DayResult {
   added: number;
   removed: number;
+  /** Only points touched this day are present (feeds the history panel/overlay). */
+  deltas: Record<string, DayDelta>;
+}
+
+function bumpDelta(deltas: Record<string, DayDelta>, id: string, key: keyof DayDelta): void {
+  const d = deltas[id] ?? (deltas[id] = { ar: 0, aj: 0, rr: 0, rj: 0 });
+  d[key]++;
 }
 
 /** Advance the induced-demand model one in-game day, mutating `dd` and `ledger`. */
@@ -25,10 +40,7 @@ export function runDay(
   rng: () => number,
 ): DayResult {
   const points = [...dd.points.values()];
-  const accessStations: AccessStation[] = stations.map((s) => ({
-    coords: s.coords,
-    lineIds: s.routeIds ?? [],
-  }));
+  const accessStations = toAccessStations(stations);
   const locations = new Map<string, Coordinate>();
   for (const p of points) locations.set(p.id, p.location);
   const capRes = new Map<string, number>();
@@ -71,6 +83,7 @@ export function runDay(
 
   // C. growth — net-equal, cap-respecting, gravity-paired
   let added = 0;
+  const deltas: Record<string, DayDelta> = {};
   const addedThisDay = new Set<string>();
   const ids = points.map((p) => p.id);
   const resWeights = points.map((p) => Math.max(0, ledger.points[p.id].resAccum));
@@ -95,6 +108,8 @@ export function runDay(
         addedThisDay.add(id);
         ledger.points[h].resAccum = Math.max(0, ledger.points[h].resAccum - cfg.POP_SIZE);
         ledger.points[w].jobAccum = Math.max(0, ledger.points[w].jobAccum - cfg.POP_SIZE);
+        bumpDelta(deltas, h, 'ar');
+        bumpDelta(deltas, w, 'aj');
         added++;
       }
     }
@@ -102,13 +117,15 @@ export function runDay(
 
   // D. decay (rare) — queue induced pops for removal while accumulator is below −POP_SIZE.
   // Never delete from live demand data here: the game may still have in-flight movements
-  // referencing the pop id (see main.ts applyPendingRemovals on load).
+  // referencing the pop id (retired to tombstone stubs at the next real load — see
+  // ledger.retirePendingRemovals).
   let removed = 0;
   for (const p of points) {
     const e = ledger.points[p.id]; // always initialised in section A above
     while (e.resAccum <= -cfg.POP_SIZE) {
       const id = findInduced(dd, ledger, p.id, 'residence', addedThisDay);
       if (!id) { e.resAccum = -cfg.POP_SIZE + 1; break; }
+      recordRemoval(dd, deltas, id);
       deferInducedPopRemoval(dd, ledger, id, cfg);
       e.resAccum += cfg.POP_SIZE;
       removed++;
@@ -116,13 +133,22 @@ export function runDay(
     while (e.jobAccum <= -cfg.POP_SIZE) {
       const id = findInduced(dd, ledger, p.id, 'job', addedThisDay);
       if (!id) { e.jobAccum = -cfg.POP_SIZE + 1; break; }
+      recordRemoval(dd, deltas, id);
       deferInducedPopRemoval(dd, ledger, id, cfg);
       e.jobAccum += cfg.POP_SIZE;
       removed++;
     }
   }
 
-  return { added, removed };
+  return { added, removed, deltas };
+}
+
+/** A removed pop changes demand at BOTH endpoints — attribute it to each (before deferral). */
+function recordRemoval(dd: DemandData, deltas: Record<string, DayDelta>, id: string): void {
+  const pop = dd.popsMap.get(id);
+  if (!pop) return;
+  bumpDelta(deltas, pop.residenceId, 'rr');
+  bumpDelta(deltas, pop.jobId, 'rj');
 }
 
 function expand(ids: string[], slots: number[]): string[] {

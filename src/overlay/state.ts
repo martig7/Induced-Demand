@@ -10,6 +10,10 @@ export interface OverlayState {
   deferredRemovalCount: number;
   /** "Clear induced demand" was clicked; reload will wipe all induced pops. */
   clearQueued: boolean;
+  /** Selected history day (green/red overlay active) or null. Takes precedence over `enabled`. */
+  historyDay?: number | null;
+  /** Inline history section expanded in the toolbar panel. */
+  historyOpen?: boolean;
 }
 
 export interface OverlayStore {

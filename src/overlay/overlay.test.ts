@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { registerOverlay, updateOverlay, setOverlayVisible, SOURCE_ID, LAYER_ID } from './overlay';
+import { registerOverlay, updateOverlay, HISTORY_SOURCE_ID, HISTORY_LAYER_ID, setOverlayVisible, SOURCE_ID, LAYER_ID } from './overlay';
 import type { ModdingAPI } from '../types/api';
 import type { OverlayFeatureCollection } from './types';
 
@@ -29,15 +29,17 @@ function mockApi() {
 test('registerOverlay registers a geojson source and a hidden circle layer', () => {
   const { api, calls } = mockApi();
   registerOverlay(api);
-  assert.equal(calls.sources.length, 1);
-  assert.equal(calls.sources[0][0], SOURCE_ID);
-  assert.equal((calls.sources[0][1] as { type: string }).type, 'geojson');
-  assert.equal(calls.layers.length, 1);
-  const layer = calls.layers[0] as { id: string; type: string; source: string; layout: { visibility: string } };
-  assert.equal(layer.id, LAYER_ID);
-  assert.equal(layer.type, 'circle');
-  assert.equal(layer.source, SOURCE_ID);
-  assert.equal(layer.layout.visibility, 'none');
+  // Main overlay + the green/red history-day layer, both registered hidden.
+  assert.deepEqual(calls.sources.map((s2) => s2[0]), [SOURCE_ID, HISTORY_SOURCE_ID]);
+  for (const [, cfg] of calls.sources) assert.equal((cfg as { type: string }).type, 'geojson');
+  type Layer = { id: string; type: string; source: string; layout: { visibility: string } };
+  const layers = calls.layers as Layer[];
+  assert.deepEqual(layers.map((l) => l.id), [LAYER_ID, HISTORY_LAYER_ID]);
+  assert.deepEqual(layers.map((l) => l.source), [SOURCE_ID, HISTORY_SOURCE_ID]);
+  for (const l of layers) {
+    assert.equal(l.type, 'circle');
+    assert.equal(l.layout.visibility, 'none');
+  }
 });
 
 test('updateOverlay pushes data to the source', () => {

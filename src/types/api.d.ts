@@ -395,6 +395,14 @@ export interface ModdingAPI {
     getBonds(): Bond[];
     /** Set a speed multiplier for a specific game speed. */
     setSpeedMultiplier(speed: GameSpeed, multiplier: number): void;
+    /**
+     * Scale multiplier for the native demand-dot layer (positive finite; the game
+     * clamps to its internal min/max). Setting a DIFFERENT value re-renders the layer.
+     * @added v1.4.x — feature-detect before calling.
+     */
+    setDemandBubbleScale?(scale: number): void;
+    /** Current demand-dot scale multiplier (default 1). @added v1.4.x */
+    getDemandBubbleScale?(): number;
   };
 
   // ---------------------------------------------------------------------------

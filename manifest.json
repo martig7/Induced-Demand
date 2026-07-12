@@ -2,7 +2,7 @@
   "id": "induced-demand",
   "name": "Induced Demand",
   "description": "Models long-run transit-induced demand: grows residential and commercial demand near well-served stations by adding commuter pops.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": { "name": "gcm" },
   "main": "index.js",
   "dependencies": { "subway-builder": ">= 1.4.2" }

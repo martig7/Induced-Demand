@@ -53,7 +53,13 @@ export function addInducedPop(
   return true;
 }
 
-/** Remove an induced pop, reversing its residents/jobs/popIds effects. */
+/**
+ * Remove an induced pop, reversing its residents/jobs/popIds effects.
+ * WARNING: deletes from popsMap — never call while a game is (or was just) running:
+ * in-flight movements (live or restored from a save) resolve pops by id and a
+ * missing id throws a GameLoop tick error every tick. Use detachInducedPop +
+ * tombstones (ledger.retirePendingRemovals / clearAllInduced) instead.
+ */
 export function removeInducedPop(dd: DemandData, id: string, cfg: InducedDemandConfig): boolean {
   if (!isInduced(id)) return false;
   const pop = dd.popsMap.get(id);
@@ -67,9 +73,57 @@ export function removeInducedPop(dd: DemandData, id: string, cfg: InducedDemandC
 }
 
 /**
+ * Make a pop demand-neutral without deleting it: subtract its residents/jobs
+ * contribution and drop it from endpoint popIds, but KEEP the popsMap entry so
+ * anything referencing the id (in-flight movements — live or restored from a
+ * save) still resolves. Guarded by popIds membership so it can never subtract
+ * twice. Returns true only when demand was actually subtracted.
+ */
+export function detachInducedPop(dd: DemandData, id: string, cfg: InducedDemandConfig): boolean {
+  if (!isInduced(id)) return false;
+  const pop = dd.popsMap.get(id);
+  if (!pop) return false;
+  const res = dd.points.get(pop.residenceId);
+  const job = dd.points.get(pop.jobId);
+  let detached = false;
+  if (res?.popIds.includes(id)) { res.residents -= cfg.POP_SIZE; dropId(res.popIds, id); detached = true; }
+  if (job?.popIds.includes(id)) { job.jobs -= cfg.POP_SIZE; dropId(job.popIds, id); detached = true; }
+  // Size 0 makes the retained entry fully inert: it adds nothing to the game's
+  // mode-share/ridership sums (which only ever ADD sizes) and our overlay's
+  // per-point induced totals. Only the id needs to stay resolvable.
+  pop.size = 0;
+  return detached;
+}
+
+/**
+ * Ensure a demand-neutral stub exists in `popsMap` for a retired pop id. Saves
+ * keep `popMovementsMap` but strip induced pops, and the sim ticks before
+ * `onGameLoaded` reaches the mod — a missing id turns into
+ * "[GameLoop] Tick error: Pop not found for pop movement <id>" EVERY tick.
+ * The stub touches no demand point, so it induces nothing and rides nothing new.
+ */
+export function ensureTombstoneStub(
+  dd: DemandData,
+  id: string,
+  rec: { residenceId: string; jobId: string } | undefined,
+  cfg: InducedDemandConfig,
+): boolean {
+  if (!isInduced(id) || dd.popsMap.has(id)) return false;
+  const res = rec ? dd.points.get(rec.residenceId) : undefined;
+  const job = rec ? dd.points.get(rec.jobId) : undefined;
+  const resLoc = res?.location ?? job?.location ?? ([0, 0] as Coordinate);
+  const jobLoc = job?.location ?? resLoc;
+  const stub = makeInducedPop(id, rec?.residenceId ?? '', rec?.jobId ?? '', resLoc, jobLoc, cfg);
+  stub.size = 0; // inert: nothing in the game divides by a pop's size — it is only summed
+  dd.popsMap.set(id, stub);
+  return true;
+}
+
+/**
  * Decay during live simulation: update demand totals now (matching the old
  * remove path) but keep the pop entry in `popsMap` so in-flight movements can
- * still resolve it by id. The entry is dropped on load via applyPendingRemovals.
+ * still resolve it by id. The entry becomes a tombstone stub on the next real
+ * load via retirePendingRemovals (see ledger.ts) — it is never deleted.
  */
 export function deferInducedPopRemoval(
   dd: DemandData,
@@ -79,24 +133,11 @@ export function deferInducedPopRemoval(
 ): boolean {
   if (!isInduced(id)) return false;
   if (ledger.pendingRemovals?.includes(id)) return false;
-  const pop = dd.popsMap.get(id);
-  if (!pop) return false;
-  const res = dd.points.get(pop.residenceId);
-  const job = dd.points.get(pop.jobId);
-  if (res) { res.residents -= cfg.POP_SIZE; dropId(res.popIds, id); }
-  if (job) { job.jobs -= cfg.POP_SIZE; dropId(job.popIds, id); }
+  if (!dd.popsMap.has(id)) return false;
+  detachInducedPop(dd, id, cfg);
   if (!ledger.pendingRemovals) ledger.pendingRemovals = [];
   ledger.pendingRemovals.push(id);
   return true;
-}
-
-/** Drop deferred pops from `popsMap` once movements cannot reference them. */
-export function finalizeDeferredRemovals(dd: DemandData, ids: readonly string[]): number {
-  let removed = 0;
-  for (const id of ids) {
-    if (dd.popsMap.delete(id)) removed++;
-  }
-  return removed;
 }
 
 function dropId(arr: string[], id: string): void {
@@ -110,12 +151,19 @@ export function countInducedPops(dd: DemandData): number {
   return n;
 }
 
-/** Pops that remain in the sim but will be dropped on the next save reload. */
+/** Pops that remain in the sim but will be retired on the next real load. */
 export function deferredRemovalPopCount(
   dd: DemandData,
-  ledger: { pendingRemovals?: string[] },
+  ledger: { pendingRemovals?: string[]; tombstones?: Record<string, unknown> },
   clearQueued: boolean,
 ): number {
-  if (clearQueued) return countInducedPops(dd);
+  if (clearQueued) {
+    // Count live induced pops only — tombstone stubs are already retired.
+    let n = 0;
+    for (const id of dd.popsMap.keys()) {
+      if (isInduced(id) && !(ledger.tombstones && id in ledger.tombstones)) n++;
+    }
+    return n;
+  }
   return ledger.pendingRemovals?.length ?? 0;
 }

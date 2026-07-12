@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isInduced, addInducedPop, removeInducedPop, deferredRemovalPopCount, countInducedPops } from './popFactory';
+import {
+  isInduced, addInducedPop, removeInducedPop, deferredRemovalPopCount, countInducedPops,
+  deferInducedPopRemoval, ensureTombstoneStub,
+} from './popFactory';
 import { DEFAULT_CONFIG } from './config';
 import type { DemandData, DemandPoint } from '../types/game-state';
 
@@ -62,4 +65,23 @@ test('deferredRemovalPopCount uses pendingRemovals or all induced when clear is 
   assert.equal(countInducedPops(dd), 2);
   assert.equal(deferredRemovalPopCount(dd, { pendingRemovals: ['induced:1'] }, false), 1);
   assert.equal(deferredRemovalPopCount(dd, { pendingRemovals: ['induced:1'] }, true), 2);
+});
+
+// Retired/deferred pops must be fully inert: size 0 means they add nothing to
+// mode-share sums or ridership, and our overlay (which sums pop.size over popsMap)
+// no longer overcounts them. The entry itself stays so movements resolve by id.
+test('deferInducedPopRemoval zeroes the pop size so it stops counting anywhere', () => {
+  const dd = demand();
+  addInducedPop(dd, 'H', 'W', 'induced:1', DEFAULT_CONFIG);
+  const led: { pendingRemovals?: string[] } = {};
+  deferInducedPopRemoval(dd, led, 'induced:1', DEFAULT_CONFIG);
+  assert.equal(dd.popsMap.get('induced:1')!.size, 0);
+});
+
+test('ensureTombstoneStub creates a size-0 stub', () => {
+  const dd = demand();
+  ensureTombstoneStub(dd, 'induced:9', { residenceId: 'H', jobId: 'W' }, DEFAULT_CONFIG);
+  assert.equal(dd.popsMap.get('induced:9')!.size, 0);
+  assert.equal(dd.points.get('H')!.residents, 0);
+  assert.deepEqual(dd.points.get('H')!.popIds, []);
 });

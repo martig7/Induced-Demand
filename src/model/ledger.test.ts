@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   newLedger, captureBaselines, reconcileBaselines, reconcileInducedPops, isPristineLedger,
   serializeForStore, deserializeFromStore, loadFromStore, saveToStore, applyPendingAccum,
-  queueInducedPopRemoval, applyPendingRemovals, type KVStore, type LedgerState,
+  mergePendingRemovals, restoreTombstoneStubs, clearAllInduced, TOMBSTONE_CAP,
+  queueInducedPopRemoval, retirePendingRemovals, type KVStore, type LedgerState,
 } from './ledger';
 import { DEFAULT_CONFIG } from './config';
 import { deferInducedPopRemoval } from './popFactory';
@@ -195,6 +196,17 @@ test('serializeForStore persists pending decay removals', () => {
   assert.deepEqual(back.pendingRemovals, ['induced:3']);
 });
 
+test('mergePendingRemovals unions session and stored deferred queues', () => {
+  const session = newLedger();
+  session.pendingRemovals = ['induced:1', 'induced:2'];
+  const stored = newLedger();
+  stored.pendingRemovals = ['induced:2', 'induced:3'];
+  assert.deepEqual(mergePendingRemovals(session, stored).pendingRemovals, [
+    'induced:1', 'induced:2', 'induced:3',
+  ]);
+  assert.equal(mergePendingRemovals(session, newLedger()), session);
+});
+
 test('reconcileInducedPops does not re-adopt pops queued for removal', () => {
   const pop: Pop = { id: 'induced:5', size: 200, residenceId: 'p', jobId: 'p' } as Pop;
   const dd: DemandData = {
@@ -207,7 +219,12 @@ test('reconcileInducedPops does not re-adopt pops queued for removal', () => {
   assert.equal(led.pops['induced:5'], undefined);
 });
 
-test('applyPendingRemovals deletes queued pops and clears the queue', () => {
+// Retiring at load must NEVER delete from popsMap: the sim ticks before onGameLoaded
+// reaches the mod and saves carry popMovementsMap, so a deleted pop can orphan a live
+// movement — "[GameLoop] Tick error: Pop not found for pop movement induced:N" every
+// tick, forever. Retired pops become demand-neutral tombstone stubs instead; the
+// game's own save process strips them, and we re-stub on load while remembered.
+test('retirePendingRemovals keeps the popsMap entry as a tombstone (never deletes)', () => {
   const pop: Pop = { id: 'induced:1', size: 200, residenceId: 'p', jobId: 'q' } as Pop;
   const dd: DemandData = {
     points: new Map([
@@ -221,13 +238,139 @@ test('applyPendingRemovals deletes queued pops and clears the queue', () => {
   deferInducedPopRemoval(dd, led, 'induced:1', DEFAULT_CONFIG);
   assert.equal(dd.points.get('p')!.residents, 400);
   assert.equal(dd.points.get('q')!.jobs, 300);
-  assert.ok(dd.popsMap.has('induced:1'));
 
-  const removed = applyPendingRemovals(dd, led, DEFAULT_CONFIG);
-  assert.equal(removed, 1);
-  assert.equal(dd.popsMap.has('induced:1'), false);
+  const retired = retirePendingRemovals(dd, led, DEFAULT_CONFIG);
+  assert.equal(retired, 1);
+  assert.ok(dd.popsMap.has('induced:1'), 'stub must remain so in-flight movements resolve');
+  assert.equal(dd.points.get('p')!.residents, 400); // demand not double-subtracted
   assert.equal(led.pendingRemovals, undefined);
   assert.equal(led.pops['induced:1'], undefined);
+  assert.deepEqual(led.tombstones?.['induced:1'], { residenceId: 'p', jobId: 'q' });
+});
+
+test('retirePendingRemovals subtracts demand for a still-attached pop, once', () => {
+  // Queued (e.g. merged from another session's queue) but never detached live.
+  const pop: Pop = { id: 'induced:1', size: 200, residenceId: 'p', jobId: 'q' } as Pop;
+  const dd: DemandData = {
+    points: new Map([
+      ['p', point('p', 600, 100, ['induced:1'])],
+      ['q', point('q', 100, 500, ['induced:1'])],
+    ]),
+    popsMap: new Map([['induced:1', pop]]),
+  };
+  const led = newLedger();
+  led.pops['induced:1'] = { residenceId: 'p', jobId: 'q' };
+  queueInducedPopRemoval(led, 'induced:1');
+  retirePendingRemovals(dd, led, DEFAULT_CONFIG);
+  assert.equal(dd.points.get('p')!.residents, 400);
+  assert.equal(dd.points.get('q')!.jobs, 300);
+  assert.deepEqual(dd.points.get('p')!.popIds, []);
+  assert.ok(dd.popsMap.has('induced:1'));
+});
+
+test('retirePendingRemovals re-stubs a pop the save stripped, without demand', () => {
+  const dd: DemandData = {
+    points: new Map([
+      ['p', point('p', 400, 100)],
+      ['q', point('q', 100, 300)],
+    ]),
+    popsMap: new Map(), // game strips induced pops from saves
+  };
+  const led = newLedger();
+  led.pops['induced:1'] = { residenceId: 'p', jobId: 'q' };
+  queueInducedPopRemoval(led, 'induced:1');
+  retirePendingRemovals(dd, led, DEFAULT_CONFIG);
+  assert.ok(dd.popsMap.has('induced:1'), 'stub satisfies saved movements referencing the id');
+  assert.equal(dd.points.get('p')!.residents, 400); // stub adds no demand
+  assert.deepEqual(dd.points.get('p')!.popIds, []);
+  assert.ok(led.tombstones?.['induced:1']);
+});
+
+test('reconcileInducedPops stubs pending-removal ids instead of restoring their demand', () => {
+  const dd: DemandData = {
+    points: new Map([
+      ['p', point('p', 400, 100)],
+      ['q', point('q', 100, 300)],
+    ]),
+    popsMap: new Map(),
+  };
+  const led = newLedger();
+  led.pops['induced:1'] = { residenceId: 'p', jobId: 'q' }; // decayed pop, queued
+  queueInducedPopRemoval(led, 'induced:1');
+  led.pops['induced:2'] = { residenceId: 'p', jobId: 'q' }; // live pop the save dropped
+  const restored = reconcileInducedPops(dd, led, DEFAULT_CONFIG);
+  assert.equal(restored, 1); // only the live pop counts as restored
+  assert.equal(dd.points.get('p')!.residents, 600); // +200 for induced:2 only — no leak
+  assert.ok(dd.popsMap.has('induced:1'), 'pending id stubbed so saved movements resolve');
+  assert.ok(dd.popsMap.has('induced:2'));
+  assert.equal(dd.points.get('p')!.popIds.includes('induced:1'), false);
+});
+
+test('restoreTombstoneStubs re-creates stubs each load and never adopts them back', () => {
+  const dd: DemandData = {
+    points: new Map([['p', point('p', 400, 100)], ['q', point('q', 100, 300)]]),
+    popsMap: new Map(),
+  };
+  const led = newLedger();
+  led.tombstones = { 'induced:7': { residenceId: 'p', jobId: 'q' } };
+  restoreTombstoneStubs(dd, led, DEFAULT_CONFIG);
+  assert.ok(dd.popsMap.has('induced:7'));
+  assert.equal(dd.points.get('p')!.residents, 400);
+  // A stub in popsMap must not be adopted into the roster as a live pop.
+  reconcileInducedPops(dd, led, DEFAULT_CONFIG);
+  assert.equal(led.pops['induced:7'], undefined);
+});
+
+test('reconcileBaselines ignores tombstone/pending stubs when deriving baselines', () => {
+  const dd: DemandData = {
+    points: new Map([['p', point('p', 400, 100)], ['q', point('q', 100, 300)]]),
+    popsMap: new Map(),
+  };
+  const led = newLedger();
+  led.tombstones = { 'induced:7': { residenceId: 'p', jobId: 'q' } };
+  restoreTombstoneStubs(dd, led, DEFAULT_CONFIG);
+  reconcileBaselines(dd, led);
+  // Stub demand is NOT in residents, so baseline must equal current — not current − 200.
+  assert.equal(led.points['p'].baselineResidents, 400);
+});
+
+test('tombstones round-trip through the store and are capped', () => {
+  const led = newLedger();
+  led.tombstones = {};
+  for (let i = 0; i < TOMBSTONE_CAP + 25; i++) {
+    led.tombstones[`induced:${i}`] = { residenceId: 'p', jobId: 'q' };
+  }
+  const back = deserializeFromStore(serializeForStore(led));
+  const keys = Object.keys(back.tombstones ?? {});
+  assert.equal(keys.length, TOMBSTONE_CAP);
+  assert.equal(keys.includes('induced:0'), false); // oldest dropped
+  assert.ok(keys.includes(`induced:${TOMBSTONE_CAP + 24}`)); // newest kept
+});
+
+test('clearAllInduced detaches every induced pop and resets the ledger, keeping tombstones', () => {
+  const dd: DemandData = {
+    points: new Map([
+      ['p', point('p', 800, 100, ['induced:1', 'induced:2'])],
+      ['q', point('q', 100, 700, ['induced:1', 'induced:2'])],
+    ]),
+    popsMap: new Map([
+      ['induced:1', { id: 'induced:1', size: 200, residenceId: 'p', jobId: 'q' } as Pop],
+      ['induced:2', { id: 'induced:2', size: 200, residenceId: 'p', jobId: 'q' } as Pop],
+    ]),
+  };
+  const led = newLedger();
+  led.seq = 3;
+  led.pops['induced:1'] = { residenceId: 'p', jobId: 'q' };
+  led.pops['induced:2'] = { residenceId: 'p', jobId: 'q' };
+  const { removed, ledger: fresh } = clearAllInduced(dd, led, DEFAULT_CONFIG);
+  assert.equal(removed, 2);
+  assert.equal(dd.points.get('p')!.residents, 400);
+  assert.equal(dd.points.get('q')!.jobs, 300);
+  assert.ok(dd.popsMap.has('induced:1'), 'clear must not orphan in-flight movements either');
+  assert.ok(dd.popsMap.has('induced:2'));
+  assert.deepEqual(fresh.pops, {});
+  assert.equal(fresh.seq, 3); // ids must never be reused while stubs exist
+  assert.ok(fresh.tombstones?.['induced:1'] && fresh.tombstones?.['induced:2']);
 });
 
 test('saveToStore swallows quota/errors so a full store never crashes the mod', () => {
@@ -239,4 +382,16 @@ test('saveToStore swallows quota/errors so a full store never crashes the mod', 
   const led = newLedger();
   led.pops['induced:1'] = { residenceId: 'a', jobId: 'b' };
   saveToStore(throwing, 'id:BOS', led); // must not throw
+});
+
+test('reconcileInducedPops never adopts an inert (size-0) stub as a live pop', () => {
+  // Storage-loss scenario: ledger blank (no tombstones either), but a session stub
+  // is still in popsMap. Adopting it would resurrect the pop at full size later.
+  const dd: DemandData = {
+    points: new Map([['p', point('p', 400, 100)], ['q', point('q', 100, 300)]]),
+    popsMap: new Map([['induced:3', { id: 'induced:3', size: 0, residenceId: 'p', jobId: 'q' } as Pop]]),
+  };
+  const led = newLedger();
+  reconcileInducedPops(dd, led, DEFAULT_CONFIG);
+  assert.equal(led.pops['induced:3'], undefined);
 });

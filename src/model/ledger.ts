@@ -1,6 +1,8 @@
 import type { DemandData } from '../types/game-state';
 import type { InducedDemandConfig } from './config';
-import { INDUCED_PREFIX, isInduced, addInducedPop, removeInducedPop, finalizeDeferredRemovals } from './popFactory';
+import {
+  INDUCED_PREFIX, isInduced, addInducedPop, detachInducedPop, ensureTombstoneStub,
+} from './popFactory';
 
 export interface PointLedger {
   baselineResidents: number;
@@ -30,7 +32,8 @@ export interface LedgerState {
    * Induced pop ids queued for removal. Decay schedules removals here instead of
    * deleting from live demand data mid-simulation — the game keeps in-flight train
    * movements that reference pops by id, and deleting one throws every tick.
-   * Applied safely at load via `applyPendingRemovals` (see main.ts).
+   * Retired safely at the next real load via `retirePendingRemovals` (demand-neutral
+   * tombstone stubs — the entries are never deleted from popsMap).
    */
   pendingRemovals?: string[];
   /**
@@ -39,6 +42,35 @@ export interface LedgerState {
    * then deleted. Never set on a live ledger — only present between load and reconcile.
    */
   pendingAccum?: Record<string, [number, number]>;
+  /**
+   * Retired induced pops. Their demand is gone, but a demand-neutral stub must stay
+   * in `popsMap` (re-created each load) because saves keep `popMovementsMap` while
+   * stripping induced pops — a movement whose pop id is missing throws a GameLoop
+   * tick error every tick. FIFO-capped at TOMBSTONE_CAP (insertion order).
+   */
+  tombstones?: Record<string, InducedPopRecord>;
+}
+
+/** Movements only survive a few save cycles; a bounded FIFO of retired ids suffices. */
+export const TOMBSTONE_CAP = 500;
+
+function capTombstones(t: Record<string, InducedPopRecord>): Record<string, InducedPopRecord> {
+  const keys = Object.keys(t);
+  if (keys.length <= TOMBSTONE_CAP) return t;
+  const kept: Record<string, InducedPopRecord> = {};
+  for (const k of keys.slice(keys.length - TOMBSTONE_CAP)) kept[k] = t[k];
+  return kept;
+}
+
+export function isTombstoned(ledger: LedgerState, id: string): boolean {
+  return !!ledger.tombstones && id in ledger.tombstones;
+}
+
+export function recordTombstone(ledger: LedgerState, id: string, rec: InducedPopRecord): void {
+  if (!ledger.tombstones) ledger.tombstones = {};
+  delete ledger.tombstones[id]; // refresh insertion order (recency)
+  ledger.tombstones[id] = rec;
+  ledger.tombstones = capTombstones(ledger.tombstones);
 }
 
 /**
@@ -89,19 +121,42 @@ export function isPendingRemoval(ledger: LedgerState, id: string): boolean {
   return ledger.pendingRemovals?.includes(id) ?? false;
 }
 
+/** Union deferred-removal queues from two ledger snapshots (session vs localStorage). */
+export function mergePendingRemovals(primary: LedgerState, secondary: LedgerState): LedgerState {
+  const a = primary.pendingRemovals ?? [];
+  const b = secondary.pendingRemovals ?? [];
+  if (b.length === 0) return primary;
+  const merged = [...a];
+  for (const id of b) {
+    if (!merged.includes(id)) merged.push(id);
+  }
+  return merged.length === a.length ? primary : { ...primary, pendingRemovals: merged };
+}
+
 export function reconcileInducedPops(
   dd: DemandData,
   ledger: LedgerState,
   cfg: InducedDemandConfig,
 ): number {
   for (const pop of dd.popsMap.values()) {
-    if (isInduced(pop.id) && !ledger.pops[pop.id] && !isPendingRemoval(ledger, pop.id)) {
+    // Adopt only LIVE pops (size > 0): a size-0 entry is an inert retired stub —
+    // adopting one (e.g. after storage loss wiped the tombstone registry) would
+    // resurrect it at full size on a later restore.
+    if (isInduced(pop.id) && pop.size > 0 && !ledger.pops[pop.id]
+      && !isPendingRemoval(ledger, pop.id) && !isTombstoned(ledger, pop.id)) {
       ledger.pops[pop.id] = { residenceId: pop.residenceId, jobId: pop.jobId };
     }
   }
   let restored = 0;
   for (const [id, rec] of Object.entries(ledger.pops)) {
     if (dd.popsMap.has(id)) continue;
+    if (isPendingRemoval(ledger, id)) {
+      // Decayed pop the save stripped: its demand is already gone — re-adding it via
+      // addInducedPop would leak +POP_SIZE. Stub it so saved movements still resolve;
+      // retirePendingRemovals turns it into a tombstone.
+      ensureTombstoneStub(dd, id, rec, cfg);
+      continue;
+    }
     if (addInducedPop(dd, rec.residenceId, rec.jobId, id, cfg)) restored++;
     else delete ledger.pops[id]; // endpoints gone — drop the stale roster entry
   }
@@ -131,6 +186,9 @@ export function reconcileBaselines(dd: DemandData, ledger: LedgerState): void {
   const indJob: Record<string, number> = {};
   for (const pop of dd.popsMap.values()) {
     if (!pop.id.startsWith(INDUCED_PREFIX)) continue;
+    // Tombstone/pending stubs contribute NO demand — counting them here would
+    // underestimate baselines by POP_SIZE per stub.
+    if (isTombstoned(ledger, pop.id) || isPendingRemoval(ledger, pop.id)) continue;
     indRes[pop.residenceId] = (indRes[pop.residenceId] ?? 0) + pop.size;
     indJob[pop.jobId] = (indJob[pop.jobId] ?? 0) + pop.size;
   }
@@ -160,6 +218,9 @@ export function serializeForStore(ledger: LedgerState): string {
   }
   const payload: Record<string, unknown> = { seq: ledger.seq, pops: ledger.pops, accum };
   if (ledger.pendingRemovals?.length) payload.pendingRemovals = ledger.pendingRemovals;
+  if (ledger.tombstones && Object.keys(ledger.tombstones).length > 0) {
+    payload.tombstones = capTombstones(ledger.tombstones);
+  }
   return JSON.stringify(payload);
 }
 
@@ -174,6 +235,9 @@ export function deserializeFromStore(s: string | null | undefined): LedgerState 
     };
     if (Array.isArray(o.pendingRemovals)) led.pendingRemovals = o.pendingRemovals;
     if (o.accum && typeof o.accum === 'object') led.pendingAccum = o.accum;
+    if (o.tombstones && typeof o.tombstones === 'object') {
+      led.tombstones = capTombstones(o.tombstones);
+    }
     return led;
   } catch {
     return newLedger();
@@ -196,24 +260,75 @@ export function applyPendingAccum(ledger: LedgerState): void {
 }
 
 /**
- * Delete every pop queued in `ledger.pendingRemovals`. Safe only before the
- * simulation builds movements for the session (see main.ts init).
+ * Retire every pop queued in `ledger.pendingRemovals`: subtract any demand still
+ * attached (guarded — decay usually subtracted it live already), keep/create a
+ * demand-neutral popsMap stub, and remember the id as a tombstone. NEVER deletes
+ * from popsMap: the sim ticks before onGameLoaded reaches the mod and saves carry
+ * popMovementsMap, so a deleted id orphans in-flight movements and the game loop
+ * throws "Pop not found for pop movement <id>" every tick.
  */
-export function applyPendingRemovals(
+export function retirePendingRemovals(
   dd: DemandData,
   ledger: LedgerState,
   cfg: InducedDemandConfig,
 ): number {
   const pending = ledger.pendingRemovals;
   if (!pending?.length) return 0;
-  let removed = 0;
+  let retired = 0;
   for (const id of pending) {
-    if (dd.popsMap.has(id)) removed += finalizeDeferredRemovals(dd, [id]);
-    else if (removeInducedPop(dd, id, cfg)) removed++;
+    const pop = dd.popsMap.get(id);
+    const rec: InducedPopRecord = ledger.pops[id]
+      ?? (pop ? { residenceId: pop.residenceId, jobId: pop.jobId } : { residenceId: '', jobId: '' });
+    detachInducedPop(dd, id, cfg);
+    ensureTombstoneStub(dd, id, rec, cfg);
+    recordTombstone(ledger, id, rec);
     delete ledger.pops[id];
+    retired++;
   }
   delete ledger.pendingRemovals;
-  return removed;
+  return retired;
+}
+
+/** Re-create demand-neutral stubs for retired ids (run once per load, after reconcile). */
+export function restoreTombstoneStubs(
+  dd: DemandData,
+  ledger: LedgerState,
+  cfg: InducedDemandConfig,
+): number {
+  let stubbed = 0;
+  for (const [id, rec] of Object.entries(ledger.tombstones ?? {})) {
+    if (ensureTombstoneStub(dd, id, rec, cfg)) stubbed++;
+  }
+  return stubbed;
+}
+
+/**
+ * "Clear induced demand": detach every induced pop (demand reverts) and retire
+ * them all as tombstones, returning a fresh ledger that keeps `seq` (ids must
+ * never be reused while stubs exist) and the tombstone registry.
+ */
+export function clearAllInduced(
+  dd: DemandData,
+  ledger: LedgerState,
+  cfg: InducedDemandConfig,
+): { removed: number; ledger: LedgerState } {
+  const fresh = newLedger();
+  fresh.seq = ledger.seq;
+  fresh.tombstones = { ...(ledger.tombstones ?? {}) };
+  const ids = new Set<string>(Object.keys(ledger.pops));
+  for (const id of dd.popsMap.keys()) if (isInduced(id)) ids.add(id);
+  let removed = 0;
+  for (const id of ids) {
+    if (fresh.tombstones[id]) continue; // already retired earlier
+    const pop = dd.popsMap.get(id);
+    const rec: InducedPopRecord = ledger.pops[id]
+      ?? (pop ? { residenceId: pop.residenceId, jobId: pop.jobId } : { residenceId: '', jobId: '' });
+    if (detachInducedPop(dd, id, cfg)) removed++;
+    ensureTombstoneStub(dd, id, rec, cfg);
+    fresh.tombstones[id] = rec;
+  }
+  fresh.tombstones = capTombstones(fresh.tombstones);
+  return { removed, ledger: fresh };
 }
 
 export function loadFromStore(store: KVStore, key: string): LedgerState {

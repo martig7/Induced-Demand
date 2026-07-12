@@ -3,18 +3,28 @@
  * Reads mode share + catchment; writes only demand (residents/jobs/pops).
  */
 import type { DemandData, Station } from './types/game-state';
-import { runDay } from './model/engine';
+import { runDay, type DayResult } from './model/engine';
+import { pushDayHistory, type DayHistoryEntry } from './model/history';
 import { DEFAULT_CONFIG } from './model/config';
 import { makeRng } from './model/gravity';
-import { INDUCED_PREFIX, removeInducedPop, deferredRemovalPopCount } from './model/popFactory';
+import { INDUCED_PREFIX, deferredRemovalPopCount } from './model/popFactory';
 import {
   loadFromStore, saveToStore, captureBaselines, reconcileBaselines, reconcileInducedPops,
-  applyPendingAccum, applyPendingRemovals, newLedger, type LedgerState, type KVStore,
+  applyPendingAccum, retirePendingRemovals, restoreTombstoneStubs, clearAllInduced,
+  mergePendingRemovals, newLedger, type LedgerState, type KVStore,
 } from './model/ledger';
+import { parseDanglingInducedMovementId, repairDanglingMovement } from './model/movementRepair';
+import { classifyGameLoad, markerForLoad, observeElapsed, type LoadMarker } from './model/loadGuard';
 import { buildOverlay } from './overlay/featureCollection';
-import { registerOverlay, updateOverlay, setOverlayVisible } from './overlay/overlay';
+import { buildHistoryOverlay } from './overlay/historyCollection';
+import { nextNudge, type NudgeState } from './overlay/demandDotRefresh';
+import {
+  registerOverlay, updateOverlay, setOverlayVisible,
+  updateHistoryOverlay, setHistoryOverlayVisible,
+} from './overlay/overlay';
 import { createOverlayStore, type OverlayStore } from './overlay/state';
 import { createPanel } from './ui/panel';
+import { createHistoryPanel } from './ui/historyPanel';
 import { TOOLBAR_PANEL_ID, TOOLBAR_PLACEMENT } from './ui/toolbarPanel';
 
 const TAG = '[InducedDemand]';
@@ -31,6 +41,8 @@ if (!api) {
   let ready = false;
   let didReconcile = false;
   let loggedSample = false;
+  /** Apply pending removals/clear once demand data is available (save reload can fire before dd). */
+  let pendingApplyMutations = false;
 
   // Cross-reload UI state on `window`: the game's toolbar is rebuilt on save reload and
   // `reloadMods()` clears mod UI, but this object survives — use it to re-register the
@@ -52,6 +64,7 @@ if (!api) {
         revision: 0,
         deferredRemovalCount: 0,
         clearQueued: false,
+        historyDay: null,
       }),
     };
   }
@@ -61,6 +74,7 @@ if (!api) {
   if (typeof panelState.revision !== 'number') overlayStore.set({ revision: 0 });
   if (typeof panelState.deferredRemovalCount !== 'number') overlayStore.set({ deferredRemovalCount: 0 });
   if (typeof panelState.clearQueued !== 'boolean') overlayStore.set({ clearQueued: false });
+  if (panelState.historyDay === undefined) overlayStore.set({ historyDay: null });
   let lastMax = 0;
 
   // Guard against duplicate execution: the mod loader may run this script more than
@@ -68,9 +82,29 @@ if (!api) {
   // registered. Each execution claims a generation; callbacks from any but the latest
   // generation no-op, so exactly one instance is ever active (newest wins; hot-reload-safe).
   const GEN_KEY = '__inducedDemandGeneration__';
-  const w = window as unknown as Record<string, number>;
-  const myGen = (w[GEN_KEY] = (w[GEN_KEY] ?? 0) + 1);
+  /** In-memory ledger survives mod hot-reload; localStorage is the durable copy of pendingRemovals. */
+  const SESSION_KEY = '__inducedDemandSession__';
+  interface PersistentSession {
+    ledger: LedgerState;
+    ledgerCity: string;
+    /** Load point of the last REAL save load processed (see model/loadGuard). */
+    loadMarker?: LoadMarker;
+    /** `saveName` from the most recent onGameLoaded (replays repeat the last real load's name). */
+    lastLoadedSaveName?: string | null;
+    /** Rolling per-day pop-change history for the current city (see model/history). */
+    history?: { city: string; days: DayHistoryEntry[] };
+  }
+  const w = window as unknown as Record<string, number | boolean | undefined>;
+  const wSession = window as unknown as Record<string, PersistentSession | undefined>;
+  const prevGen = (w[GEN_KEY] as number | undefined) ?? 0;
+  const myGen = prevGen + 1;
+  w[GEN_KEY] = myGen;
   const isCurrent = (): boolean => w[GEN_KEY] === myGen;
+  // NOTE: no timing-based suppression here. `onGameLoaded` replays during reloadMods()
+  // cannot be bounded by timers or by `modding-api-reload-complete` (the ModManager
+  // button and the hot-reload shortcut re-run scripts and re-fire hooks AFTER that
+  // event; the loader awaits IPC between scripts). Real loads are instead detected
+  // from game state in init() via classifyGameLoad — see docs/MODDING_UI.md.
 
   // Persist through localStorage, NOT api.storage:
   // does NOT rehydrate from disk on a cold launch, so api.storage.get returns nothing after a full
@@ -80,11 +114,72 @@ if (!api) {
     try { return window.localStorage; } catch { return null; }
   })();
   const LEDGER_KEY = (city: string): string => `induceddemand:ledger:${city}`;
-  // Clear-demand marker: set on click, applied + cleared on the next load. Kept as its own key.
-  const CLEAR_KEY = 'induceddemand:clear';
+  // Clear-demand marker: set on click, applied + consumed on the next REAL load of the
+  // SAME city. Scoped per city — a global marker would clear whichever city happens to
+  // load next (e.g. when the user switches city to force a full load).
+  const CLEAR_KEY = (city: string): string => `induceddemand:clear:${city}`;
+  const LEGACY_CLEAR_KEY = 'induceddemand:clear'; // pre-1.0.3 unscoped marker
   const CLEAR_ON = '1';
 
-  const isClearQueued = (): boolean => store?.getItem(CLEAR_KEY) === CLEAR_ON;
+  function ensureSession(): PersistentSession {
+    let s = wSession[SESSION_KEY];
+    if (!s) {
+      s = { ledger, ledgerCity };
+      wSession[SESSION_KEY] = s;
+    }
+    return s;
+  }
+
+  function persistSession(): void {
+    // Mutate in place — the session object also carries the load marker across reloads.
+    const s = ensureSession();
+    s.ledger = ledger;
+    s.ledgerCity = ledgerCity;
+  }
+
+  function elapsedSeconds(): number | null {
+    try {
+      const v = api.gameState.getElapsedSeconds();
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** City key for localStorage — falls back to session city during early bootstrap. */
+  function storageCity(city = key()): string {
+    if (city !== 'unknown') return city;
+    return wSession[SESSION_KEY]?.ledgerCity ?? city;
+  }
+
+  function loadLedgerForInit(city: string, applyQueuedMutations: boolean): LedgerState {
+    const storeCity = storageCity(city);
+    const fromStore = store ? loadFromStore(store, LEDGER_KEY(storeCity)) : newLedger();
+    const session = wSession[SESSION_KEY];
+    const sessionOk = !!session?.ledger
+      && (city === 'unknown' || session.ledgerCity === city);
+
+    if (applyQueuedMutations) {
+      // Prefer store, but keep any pendingRemovals that only exist in the session yet.
+      return sessionOk ? mergePendingRemovals(fromStore, session.ledger) : fromStore;
+    }
+    if (sessionOk) return mergePendingRemovals(session.ledger, fromStore);
+    return fromStore;
+  }
+
+  function persistLedgerToStore(): void {
+    if (!store) return;
+    const city = storageCity();
+    if (city === 'unknown') return;
+    ledgerCity = city;
+    saveToStore(store, LEDGER_KEY(city), ledger);
+  }
+
+  const isClearQueued = (city = storageCity()): boolean => {
+    if (!store) return false;
+    return store.getItem(CLEAR_KEY(city)) === CLEAR_ON
+      || store.getItem(LEGACY_CLEAR_KEY) === CLEAR_ON;
+  };
 
   function syncPanelState(): void {
     const dd = api.gameState.getDemandData();
@@ -100,12 +195,67 @@ if (!api) {
     });
   }
 
+  /** Live routes only — in-progress (temp-parent) routes do not induce demand. */
+  function inductionStations(): Station[] {
+    return api.gameState.getStations({ includeTempRoutes: false });
+  }
+
+  /**
+   * Force the game's NATIVE demand-dot layer to re-read live residents/jobs after we
+   * changed them (see overlay/demandDotRefresh). No-op when the game lacks the
+   * bubble-scale actions. Module-local state: after a mod reload the first nudge
+   * simply re-adopts whatever scale is live.
+   */
+  let dotNudgeState: NudgeState | null = null;
+  function refreshNativeDemandDots(): void {
+    try {
+      const { getDemandBubbleScale, setDemandBubbleScale } = api.actions;
+      if (!getDemandBubbleScale || !setDemandBubbleScale) return;
+      const current = getDemandBubbleScale();
+      if (typeof current !== 'number' || !Number.isFinite(current) || current <= 0) return;
+      const r = nextNudge(current, dotNudgeState);
+      dotNudgeState = { base: r.base, lastSet: r.lastSet };
+      setDemandBubbleScale(r.set);
+    } catch (e) {
+      console.error(`${TAG} native demand-dot refresh failed`, e);
+    }
+  }
+
+  /** History entries for the CURRENT city (empty when the buffer belongs to another). */
+  function historyDays(): readonly DayHistoryEntry[] {
+    const s = wSession[SESSION_KEY];
+    return s?.history && s.history.city === key() ? s.history.days : [];
+  }
+
+  function recordDayHistory(day: number, result: DayResult): void {
+    const s = ensureSession();
+    const city = key();
+    const days = s.history?.city === city ? s.history.days : [];
+    s.history = {
+      city,
+      days: pushDayHistory(days, {
+        day, added: result.added, removed: result.removed, deltas: result.deltas,
+      }),
+    };
+  }
+
   function refreshOverlay(): void {
-    if (!overlayStore.get().enabled) { setOverlayVisible(api, false); return; }
+    const s = overlayStore.get();
+    // A selected history day takes precedence over the main overlay's On/Off.
+    if (s.historyDay != null) {
+      setOverlayVisible(api, false);
+      const dd = api.gameState.getDemandData();
+      const entry = historyDays().find((e) => e.day === s.historyDay);
+      if (!dd || !entry) { setHistoryOverlayVisible(api, false); return; }
+      updateHistoryOverlay(api, buildHistoryOverlay(entry, dd.points, s.metric));
+      setHistoryOverlayVisible(api, true);
+      return;
+    }
+    setHistoryOverlayVisible(api, false);
+    if (!s.enabled) { setOverlayVisible(api, false); return; }
     const dd = api.gameState.getDemandData();
     if (!dd) return;
-    const s = overlayStore.get();
-    const fc = buildOverlay(dd, api.gameState.getStations(), s.view, s.metric, DEFAULT_CONFIG);
+    const fc = buildOverlay(dd, inductionStations(), s.view, s.metric, DEFAULT_CONFIG);
     lastMax = fc.maxValue;
     updateOverlay(api, fc);
     setOverlayVisible(api, true);
@@ -115,39 +265,52 @@ if (!api) {
   /**
    * "Clear induced demand" — queue a reset applied on the NEXT load. We can't delete pops in a
    * running sim (the game holds in-flight train/journey movements that reference them by id, which
-   * we can't reach, so a deletion throws every tick). Instead we persist a marker; on reload init()
-   * removes every induced pop before the simulation builds movements (safe), then resets the ledger.
+   * we can't reach, so a deletion throws every tick). Instead we persist a marker; on save reload
+   * init() removes every induced pop before the simulation builds movements (safe), then resets the ledger.
    */
   function resetInducedDemand(): void {
     try {
-      store?.setItem(CLEAR_KEY, CLEAR_ON);
+      const city = storageCity();
+      // Unknown city: fall back to the legacy global marker (consumed by the next load).
+      store?.setItem(city === 'unknown' ? LEGACY_CLEAR_KEY : CLEAR_KEY(city), CLEAR_ON);
       syncPanelState();
-      console.log(`${TAG} reset QUEUED — reload the save to clear induced demand (applied safely at load).`);
+      console.log(
+        `${TAG} reset QUEUED for ${city} — applies on the next FULL load: restart the app or load `
+        + `another city first. (Menu ▸ Continue re-uses the running session and does not reload the save.)`,
+      );
     } catch (e) {
       console.error(`${TAG} reset failed`, e);
     }
   }
 
   function refreshPanelRender(): void {
+    // History renders INLINE in the toolbar panel: the game's addFloatingPanel is
+    // not a window-opener — it adds a collapsed top-bar icon (see docs/MODDING_UI.md).
     persistentUi.renderPanel = createPanel(
       api,
       overlayStore,
       () => lastMax,
       () => persistentUi.resetInducedDemand?.(),
+      createHistoryPanel(api, overlayStore, historyDays),
     );
   }
 
   function registerToolbarPanel(): void {
     refreshPanelRender();
     registerOverlay(api);
+    const React = api.utils.React as { createElement: (type: unknown) => unknown };
     api.ui.addToolbarPanel({
       id: TOOLBAR_PANEL_ID,
       icon: 'TrendingUp',
       tooltip: 'Induced Demand',
       title: 'Induced Demand',
       width: 260,
-      // Delegate to the latest render so any surviving toolbar entry stays live after mod reload.
-      render: () => persistentUi.renderPanel?.(),
+      // Mount Panel as a React component so its store subscription (useEffect) runs.
+      // Calling renderPanel() directly skips hooks and the deferred-removal label never updates.
+      render: () => {
+        const Panel = persistentUi.renderPanel;
+        return Panel ? React.createElement(Panel) : null;
+      },
     });
   }
 
@@ -173,6 +336,46 @@ if (!api) {
   persistentUi.resetInducedDemand = resetInducedDemand;
   refreshPanelRender();
 
+  // Self-heal orphaned movements (see model/movementRepair): the game logs
+  // "Pop not found for pop movement induced:N" through console.error every tick.
+  // Patch console.error ONCE per page session (window-keyed — re-patching each mod
+  // reload would chain wrappers); each generation takes over the handler.
+  const REPAIR_KEY = '__inducedDemandDanglingRepair__';
+  interface RepairHook { handle?: (id: string) => void; }
+  const wRepair = window as unknown as Record<string, RepairHook | undefined>;
+  if (!wRepair[REPAIR_KEY]) {
+    const hook: RepairHook = {};
+    wRepair[REPAIR_KEY] = hook;
+    const original = console.error.bind(console);
+    console.error = (...args: unknown[]): void => {
+      original(...args);
+      try {
+        const id = parseDanglingInducedMovementId(args);
+        if (id) hook.handle?.(id);
+      } catch { /* never interfere with logging */ }
+    };
+  }
+  const repairedIds = new Set<string>();
+  wRepair[REPAIR_KEY].handle = (id) => {
+    if (!isCurrent() || repairedIds.has(id)) return;
+    repairedIds.add(id);
+    // Repair outside the console.error call (and its tick) — next macrotask.
+    setTimeout(() => {
+      if (!isCurrent()) return;
+      try {
+        const dd = api.gameState.getDemandData();
+        if (!dd) return;
+        if (repairDanglingMovement(dd, ledger, id, DEFAULT_CONFIG)) {
+          persistSession();
+          persistLedgerToStore();
+          console.log(`${TAG} repaired dangling movement ${id} (stubbed + tombstoned)`);
+        }
+      } catch (e) {
+        console.warn(`${TAG} dangling-movement repair failed for ${id}`, e);
+      }
+    }, 0);
+  };
+
   // Identity is read LIVE:
   // for save-loaded sessions, so cached values can't be trusted for the storage key.
   const currentCity = (): string => {
@@ -189,15 +392,19 @@ if (!api) {
     return (h ^ day) >>> 0;
   }
 
-  // Ensure the id counter is past any induced pop already in the loaded save, so
+  // Ensure the id counter is past any induced pop already in the loaded save — including
+  // retired ids (tombstones/pending) whose stubs may not be in popsMap yet — so
   // regenerated ids cannot collide even if the ledger was not (or was wrongly) persisted.
   function bumpSeq(dd: DemandData): void {
     let max = ledger.seq;
-    for (const id of dd.popsMap.keys()) {
-      if (!id.startsWith(INDUCED_PREFIX)) continue;
+    const consider = (id: string): void => {
+      if (!id.startsWith(INDUCED_PREFIX)) return;
       const n = Number(id.slice(INDUCED_PREFIX.length));
       if (Number.isFinite(n) && n + 1 > max) max = n + 1;
-    }
+    };
+    for (const id of dd.popsMap.keys()) consider(id);
+    for (const id of ledger.pendingRemovals ?? []) consider(id);
+    for (const id of Object.keys(ledger.tombstones ?? {})) consider(id);
     ledger.seq = max;
   }
 
@@ -212,46 +419,84 @@ if (!api) {
     // can't be mistaken for baseline demand. Idempotent — pops still present are left untouched.
     const restored = reconcileInducedPops(dd, ledger, DEFAULT_CONFIG);
     if (restored > 0) console.log(`${TAG} restored ${restored} induced pops missing from the save`);
+    // Retired pops must stay resolvable by id (saves keep movements, strip pops).
+    restoreTombstoneStubs(dd, ledger, DEFAULT_CONFIG);
     didReconcile = true;
   }
 
-  function init(): void {
+  function init(applyQueuedMutations = false): void {
     try {
+      if (applyQueuedMutations) pendingApplyMutations = true;
+      // Deleting pops is only safe on a REAL save load (before the sim builds
+      // movements). Mod-reload replays of onGameLoaded carry the same save name
+      // and a non-rewound game clock — classify and skip them (see model/loadGuard).
+      const sess = ensureSession();
+      const elapsed = elapsedSeconds();
+      const loadKind = classifyGameLoad(sess.loadMarker ?? null, sess.lastLoadedSaveName ?? null, elapsed);
+      const shouldApply = pendingApplyMutations && loadKind === 'fresh-load';
       didReconcile = false;
       const city = key();
-      // localStorage is synchronous and cold-start-hydrated, so this load actually returns the
-      // persisted roster (unlike api.storage). Load the ledger for the CURRENT city and remember
-      // which city it belongs to, so a save can never write it under the wrong (e.g. 'unknown') key.
-      ledger = store ? loadFromStore(store, LEDGER_KEY(city)) : newLedger();
-      ledgerCity = city;
-      const pendingClear = store?.getItem(CLEAR_KEY) === CLEAR_ON;
-      if (pendingClear) store?.removeItem(CLEAR_KEY); // consume once
+      // Always merge session↔store so pendingRemovals aren't lost when one side lags.
+      ledger = loadLedgerForInit(city, shouldApply);
+      ledgerCity = city !== 'unknown'
+        ? city
+        : (wSession[SESSION_KEY]?.ledgerCity ?? city);
 
       const dd = api.gameState.getDemandData();
-      if (dd && pendingClear) {
-        // Apply a queued "Clear induced demand" now — before the simulation builds movements for
-        // this session, so removing the pops can't dangle any in-flight journey.
-        let removed = 0;
-        for (const id of [...dd.popsMap.keys()]) {
-          if (id.startsWith(INDUCED_PREFIX) && removeInducedPop(dd, id, DEFAULT_CONFIG)) removed++;
+      if (!dd) {
+        if (DEBUG && shouldApply) {
+          console.log(`${TAG} init: apply pending but demand data not ready yet — will retry`);
         }
-        ledger = newLedger();
-        if (store) saveToStore(store, LEDGER_KEY(city), ledger); // persist the cleared state immediately
-        console.log(`${TAG} CLEAR applied on load: removed ${removed} induced pops; ledger reset.`);
+        persistSession();
+        return;
       }
-      if (dd) {
-        const decayRemoved = applyPendingRemovals(dd, ledger, DEFAULT_CONFIG);
-        if (decayRemoved > 0) {
-          console.log(`${TAG} applied ${decayRemoved} queued decay removal(s) on load.`);
+
+      const clearCity = storageCity(city);
+      const pendingClear = shouldApply && isClearQueued(clearCity);
+      if (pendingClear) { // consume once (both scoped and legacy markers)
+        store?.removeItem(CLEAR_KEY(clearCity));
+        store?.removeItem(LEGACY_CLEAR_KEY);
+      }
+
+      if (pendingClear) {
+        // Detach + tombstone, never delete: a hard popsMap.delete orphans in-flight
+        // movements (live or restored from the save) → GameLoop tick error every tick.
+        const cleared = clearAllInduced(dd, ledger, DEFAULT_CONFIG);
+        ledger = cleared.ledger;
+        if (store && city !== 'unknown') {
+          saveToStore(store, LEDGER_KEY(city), ledger);
         }
+        console.log(`${TAG} CLEAR applied: retired ${cleared.removed} induced pops; ledger reset (stubs remain until the game's next save strips them).`);
       }
-      if (dd) { ensureReconcile(dd); captureBaselines(dd, ledger); }
+      if (shouldApply) {
+        const queued = ledger.pendingRemovals?.length ?? 0;
+        const retired = retirePendingRemovals(dd, ledger, DEFAULT_CONFIG);
+        console.log(
+          `${TAG} retirePendingRemovals: queued=${queued}, retired=${retired}`,
+        );
+      }
+      if (pendingApplyMutations) {
+        // Processed (applied, or skipped as a mod-reload replay) — settle the marker.
+        if (loadKind === 'fresh-load') {
+          sess.loadMarker = markerForLoad(sess.lastLoadedSaveName ?? null, elapsed);
+        } else {
+          if (sess.loadMarker) observeElapsed(sess.loadMarker, elapsed);
+          if (DEBUG) {
+            console.log(`${TAG} onGameLoaded replay (mod reload) — queued clear/removals kept for the next real load`);
+          }
+        }
+        pendingApplyMutations = false;
+      }
+      ensureReconcile(dd);
+      captureBaselines(dd, ledger);
       ready = true;
       refreshOverlay();
       syncPanelState();
-      const pts = dd ? dd.points.size : 0;
+      const pts = dd.points.size;
       const stations = api.gameState.getStations().length;
       console.log(`${TAG} ready for ${key()} — ${pts} demand points, ${stations} stations`);
+      persistSession();
+      persistLedgerToStore();
     } catch (e) {
       console.error(`${TAG} init failed`, e);
     }
@@ -277,33 +522,70 @@ if (!api) {
     }
   }
 
-  // Toolbar: reloadMods clears uiComponents then re-fires onMapReady; save reload only fires onGameLoaded.
+  // Toolbar: reloadMods clears uiComponents then re-fires onMapReady + onGameLoaded;
+  // save reload only fires onGameLoaded (see docs/MODDING_UI.md).
   function setup(): void {
     if (!isCurrent()) return;
     persistentUi.mapReady = true;
     ensureToolbarPanel();
-    void init();
+    void init(false);
+    // Menu ▸ Continue (same city) remounts the map WITHOUT applying the pending save
+    // (game v1.4.10 StoreInitializer caches init per city|mode), so onGameLoaded never
+    // fires and queued work cannot safely apply — the old sim state (in-flight journeys)
+    // is still live. Tell the user instead of leaving the count silently stuck.
+    const queued = ledger.pendingRemovals?.length ?? 0;
+    if (queued > 0 || isClearQueued()) {
+      console.log(
+        `${TAG} ${queued} queued removal(s)${isClearQueued() ? ' + a full clear' : ''} pending — `
+        + `they apply on the next FULL load (app restart, or load a different city and come back). `
+        + `Menu ▸ Continue does not actually reload the save.`,
+      );
+    }
   }
 
+  api.hooks.onMapReady(setup);
+  api.hooks.onGameLoaded((saveName) => {
+    if (!isCurrent()) return;
+    // Always request the apply; init() classifies real load vs mod-reload replay.
+    ensureSession().lastLoadedSaveName = saveName ?? null;
+    if (DEBUG) console.log(`${TAG} onGameLoaded save=${saveName}`);
+    void init(true);
+    ensureToolbarPanel();
+  });
+  // Save reload can fire onGameLoaded before demand data exists; finish deferred apply then.
+  api.hooks.onDemandChange(() => {
+    if (!isCurrent() || !pendingApplyMutations) return;
+    if (DEBUG) console.log(`${TAG} onDemandChange: retrying deferred apply`);
+    void init(true);
+  });
   api.hooks.onCityLoad((code) => {
     if (!isCurrent()) return;
     cachedCity = code;
     didReconcile = false;
     loggedSample = false;
-  });
-  api.hooks.onMapReady(setup);
-  api.hooks.onGameLoaded(() => {
-    if (!isCurrent()) return;
-    void init();
-    ensureToolbarPanel();
+    // History (and any selected day) belongs to one city; drop both on a city switch.
+    const hist = wSession[SESSION_KEY]?.history;
+    if (hist && hist.city !== code) {
+      delete wSession[SESSION_KEY]!.history;
+      if (overlayStore.get().historyDay != null) overlayStore.set({ historyDay: null });
+    }
+    // City code often arrives after onGameLoaded on save reload — retry apply with the right key.
+    if (pendingApplyMutations) {
+      if (DEBUG) console.log(`${TAG} onCityLoad(${code}): retrying deferred apply`);
+      void init(true);
+    }
   });
 
   api.hooks.onDayChange((day) => {
     if (!isCurrent()) return;
     if (!ready) return;
+    // Keep the load marker's game-clock high-water mark current: a later save
+    // reload is recognized by the clock rewinding below this (see model/loadGuard).
+    const marker = wSession[SESSION_KEY]?.loadMarker;
+    if (marker) observeElapsed(marker, elapsedSeconds());
     const dd = api.gameState.getDemandData();
     if (!dd) return;
-    const stations = api.gameState.getStations();
+    const stations = inductionStations();
     if (DEBUG) logSample(dd, stations);
     try {
       ensureReconcile(dd);
@@ -311,12 +593,13 @@ if (!api) {
     } catch (e) {
       console.error(`${TAG} reconcile failed`, e);
     }
-    let result = { added: 0, removed: 0 };
+    let result: DayResult = { added: 0, removed: 0, deltas: {} };
     try {
       result = runDay(dd, stations, ledger, DEFAULT_CONFIG, makeRng(hashSeed(currentCity(), day)));
     } catch (e) {
       console.error(`${TAG} runDay failed on day ${day}`, e);
     }
+    recordDayHistory(day, result);
     if (DEBUG) {
       let induced = 0;
       for (const id of dd.popsMap.keys()) if (id.startsWith(INDUCED_PREFIX)) induced++;
@@ -338,7 +621,10 @@ if (!api) {
       console.log(`${TAG} day ${day}: +${result.added} -${result.removed} pops`);
     }
     if (overlayStore.get().enabled) refreshOverlay();
+    if (result.added > 0 || result.removed > 0) refreshNativeDemandDots();
     syncPanelState();
+    persistSession();
+    if (result.removed > 0) persistLedgerToStore();
   });
 
   api.hooks.onGameSaved(() => {
@@ -348,11 +634,12 @@ if (!api) {
     // init ran before the city code was available (city 'unknown', empty ledger): without this, an
     // autosave could write that empty ledger over a real city's saved roster.
     if (city === 'unknown' || city !== ledgerCity) return;
+    persistSession();
     saveToStore(store, LEDGER_KEY(city), ledger);
   });
 
   // Mod hot-reload: script re-runs; triggerPostReloadLifecycle re-fires hooks (no proactive register).
   try {
-    if (api.gameState.getDemandData()) void init();
+    if (api.gameState.getDemandData()) void init(false);
   } catch { /* game not loaded yet — the hooks will fire normally */ }
 }

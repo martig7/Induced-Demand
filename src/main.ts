@@ -15,6 +15,7 @@ import {
 } from './model/ledger';
 import { parseDanglingInducedMovementId, repairDanglingMovement } from './model/movementRepair';
 import { buildSlotSet, DEFAULT_SLOT_SET, type SlotSet } from './model/commuteTimes';
+import { rescueCommuteTimes } from './model/commuteRescue';
 import { classifyGameLoad, markerForLoad, observeElapsed, type LoadMarker } from './model/loadGuard';
 import { buildOverlay } from './overlay/featureCollection';
 import { buildHistoryOverlay } from './overlay/historyCollection';
@@ -446,6 +447,13 @@ if (!api) {
     if (restored > 0) console.log(`${TAG} restored ${restored} induced pops missing from the save`);
     // Retired pops must stay resolvable by id (saves keep movements, strip pops).
     restoreTombstoneStubs(dd, ledger, DEFAULT_CONFIG);
+    // Repair pops holding stale commute times (older builds pinned every commute to
+    // 8:00/17:00). Retimes in place — never re-creates a pop (see model/commuteRescue).
+    const retimed = rescueCommuteTimes(dd, slots);
+    if (retimed > 0) {
+      console.log(`${TAG} rescued ${retimed} induced pops with stale commute times`);
+      refreshNativeDemandDots();
+    }
     didReconcile = true;
   }
 

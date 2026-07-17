@@ -13,6 +13,7 @@
  */
 import type { Coordinate } from '../types/core';
 import { haversine } from './geo';
+import type { RouteResult } from './router';
 
 export const ROAD_CLASSES = ['highway', 'major', 'minor'] as const;
 export type RoadClass = (typeof ROAD_CLASSES)[number];
@@ -40,6 +41,21 @@ export interface RoadFeatureCollection {
  * two directions of the same road, so the source of `e` is `to[e ^ 1]`. The router
  * relies on this to walk a path backwards without storing a parent node.
  */
+/**
+ * The polyline each undirected edge follows, kept flat and indexed by `edge >> 1`
+ * (twins share one entry; the odd direction reads it reversed). Only populated when
+ * `keepGeometry` is set — it costs ~11 MB on a real city and is needed only for
+ * drawing a route, not for routing one.
+ */
+export interface EdgeGeometry {
+  lon: Float64Array;
+  lat: Float64Array;
+  /** Index into lon/lat of the first shape point of undirected edge k. */
+  start: Int32Array;
+  /** Number of shape points of undirected edge k (endpoints included). */
+  count: Int32Array;
+}
+
 export interface RoadGraph {
   nodeLon: Float64Array;
   nodeLat: Float64Array;
@@ -54,6 +70,13 @@ export interface RoadGraph {
   edgeCount: number;
   /** Node ids bucketed by GRID_DEG cell, for snapping. */
   grid: Map<string, number[]>;
+  /** Way shapes, or null when the graph was built without `keepGeometry`. */
+  geom: EdgeGeometry | null;
+}
+
+export interface BuildOptions {
+  /** Retain each way's shape so routes can be drawn (see EdgeGeometry). */
+  keepGeometry?: boolean;
 }
 
 /** The opposite direction of an undirected edge. */
@@ -71,8 +94,9 @@ function linesOf(f: RoadFeature): Coordinate[][] {
   return [];
 }
 
-export function buildRoadGraph(geojson: RoadFeatureCollection): RoadGraph {
+export function buildRoadGraph(geojson: RoadFeatureCollection, opts: BuildOptions = {}): RoadGraph {
   const features = geojson.features ?? [];
+  const keepGeometry = opts.keepGeometry ?? false;
 
   // Pass 1: count coordinate uses so we can tell junctions from through-points.
   const uses = new Map<string, number>();
@@ -100,6 +124,17 @@ export function buildRoadGraph(geojson: RoadFeatureCollection): RoadGraph {
     return id;
   };
 
+  const geomLon: number[] = [];
+  const geomLat: number[] = [];
+  const geomStart: number[] = [];
+  const geomCount: number[] = [];
+  /** Record the shape of the undirected edge about to be linked. */
+  const recordGeometry = (line: Coordinate[], from: number, toIdx: number): void => {
+    geomStart.push(geomLon.length);
+    geomCount.push(toIdx - from + 1);
+    for (let i = from; i <= toIdx; i++) { geomLon.push(line[i][0]); geomLat.push(line[i][1]); }
+  };
+
   const to: number[] = [];
   const len: number[] = [];
   const cls: number[] = [];
@@ -119,6 +154,7 @@ export function buildRoadGraph(geojson: RoadFeatureCollection): RoadGraph {
     for (const line of linesOf(f)) {
       if (line.length < 2) continue;
       let anchor = getNode(line[0]);
+      let anchorIdx = 0;
       let meters = 0;
       for (let i = 1; i < line.length; i++) {
         meters += haversine(line[i - 1], line[i]);
@@ -126,10 +162,12 @@ export function buildRoadGraph(geojson: RoadFeatureCollection): RoadGraph {
         if (!isJunction) continue;
         const node = getNode(line[i]);
         if (node !== anchor && meters > 0) {
+          if (keepGeometry) recordGeometry(line, anchorIdx, i);
           link(anchor, node, meters, roadClass); // e
           link(node, anchor, meters, roadClass); // e ^ 1
         }
         anchor = node;
+        anchorIdx = i;
         meters = 0;
       }
     }
@@ -158,7 +196,43 @@ export function buildRoadGraph(geojson: RoadFeatureCollection): RoadGraph {
     cls: Uint8Array.from(cls),
     edgeCount: to.length,
     grid,
+    geom: keepGeometry
+      ? {
+        lon: Float64Array.from(geomLon),
+        lat: Float64Array.from(geomLat),
+        start: Int32Array.from(geomStart),
+        count: Int32Array.from(geomCount),
+      }
+      : null,
   };
+}
+
+/**
+ * The coordinates a route actually follows. With geometry the full road shape is
+ * returned; without it, only the junctions the route passed through — a coarse
+ * polyline that cuts corners, fine for a sanity check but not for drawing.
+ */
+export function pathCoordinates(graph: RoadGraph, route: RouteResult): Coordinate[] {
+  const nodeCoord = (n: number): Coordinate => [graph.nodeLon[n], graph.nodeLat[n]];
+  if (!graph.geom) return route.nodes.map(nodeCoord);
+
+  const out: Coordinate[] = [];
+  const push = (c: Coordinate): void => {
+    const last = out[out.length - 1];
+    if (last && last[0] === c[0] && last[1] === c[1]) return; // shared junction
+    out.push(c);
+  };
+  for (const edge of route.edges) {
+    const k = edge >> 1;
+    const start = graph.geom.start[k];
+    const count = graph.geom.count[k];
+    if (edge & 1) {
+      for (let i = count - 1; i >= 0; i--) push([graph.geom.lon[start + i], graph.geom.lat[start + i]]);
+    } else {
+      for (let i = 0; i < count; i++) push([graph.geom.lon[start + i], graph.geom.lat[start + i]]);
+    }
+  }
+  return out.length ? out : route.nodes.map(nodeCoord);
 }
 
 /** Nearest graph node to a coordinate, searching outward ring by ring. */

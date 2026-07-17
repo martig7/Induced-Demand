@@ -30,6 +30,8 @@ export interface RouteResult {
   classLengths: [number, number, number];
   /** Junction nodes from origin to destination inclusive. */
   nodes: number[];
+  /** Edge ids in travel order — indexes into the graph's arrays and its geometry. */
+  edges: number[];
 }
 
 export interface DrivingRouter {
@@ -91,7 +93,7 @@ export function createRouter(graph: RoadGraph, speeds: Speeds): DrivingRouter {
 
   function route(from: number, to: number): RouteResult | null {
     if (from < 0 || to < 0 || from >= graph.nodeCount || to >= graph.nodeCount) return null;
-    if (from === to) return { distance: 0, seconds: 0, classLengths: [0, 0, 0], nodes: [from] };
+    if (from === to) return { distance: 0, seconds: 0, classLengths: [0, 0, 0], nodes: [from], edges: [] };
 
     run++;
     heap.clear();
@@ -125,6 +127,7 @@ export function createRouter(graph: RoadGraph, speeds: Speeds): DrivingRouter {
   function unwind(goal: number): RouteResult {
     const classLengths: [number, number, number] = [0, 0, 0];
     const nodes: number[] = [goal];
+    const edges: number[] = [];
     let distance = 0;
     let cur = goal;
     for (;;) {
@@ -132,11 +135,13 @@ export function createRouter(graph: RoadGraph, speeds: Speeds): DrivingRouter {
       if (e === -1) break;
       classLengths[graph.cls[e]] += graph.len[e];
       distance += graph.len[e];
+      edges.push(e);
       cur = graph.to[edgeTwin(e)]; // the edge's source
       nodes.push(cur);
     }
     nodes.reverse();
-    return { distance, seconds: time[goal], classLengths, nodes };
+    edges.reverse();
+    return { distance, seconds: time[goal], classLengths, nodes, edges };
   }
 
   return { route, speeds };

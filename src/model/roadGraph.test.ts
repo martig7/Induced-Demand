@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRoadGraph, snapToNode, edgeTwin, type RoadFeatureCollection } from './roadGraph';
+import { buildRoadGraph, snapToNode, edgeTwin, pathCoordinates, type RoadFeatureCollection } from './roadGraph';
+import { createRouter, DEFAULT_SPEEDS } from './router';
 
 /** Two ways meeting at a shared middle node: A—B—C horizontally, D—B vertically. */
 function crossRoads(): RoadFeatureCollection {
@@ -95,4 +96,63 @@ test('snapToNode searches outward past empty grid cells', () => {
   const s = snapToNode(g, [0.2, 0.2]); // far away — must still resolve
   assert.ok(s);
   assert.ok(s.dist > 1000);
+});
+
+test('buildRoadGraph keeps way geometry only when asked', () => {
+  const curvy: RoadFeatureCollection = {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: { roadClass: 'minor' },
+      geometry: { type: 'LineString', coordinates: [[0, 0], [0.005, 0.004], [0.01, 0]] } }],
+  };
+  assert.equal(buildRoadGraph(curvy).geom, null, 'geometry is opt-in: it costs ~11 MB on a real city');
+  const g = buildRoadGraph(curvy, { keepGeometry: true });
+  assert.ok(g.geom);
+  assert.equal(g.geom.count[0], 3, 'all three shape points are retained for the single edge');
+});
+
+test('pathCoordinates follows the road shape, not just the junctions', () => {
+  const g = buildRoadGraph({
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: { roadClass: 'minor' },
+      geometry: { type: 'LineString', coordinates: [[0, 0], [0.005, 0.004], [0.01, 0]] } }],
+  }, { keepGeometry: true });
+  const from = snapToNode(g, [0, 0])!.node;
+  const to = snapToNode(g, [0.01, 0])!.node;
+  const route = createRouter(g, DEFAULT_SPEEDS).route(from, to)!;
+  assert.deepEqual(pathCoordinates(g, route), [[0, 0], [0.005, 0.004], [0.01, 0]]);
+});
+
+test('pathCoordinates reverses geometry when the edge is traversed backwards', () => {
+  const g = buildRoadGraph({
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: { roadClass: 'minor' },
+      geometry: { type: 'LineString', coordinates: [[0, 0], [0.005, 0.004], [0.01, 0]] } }],
+  }, { keepGeometry: true });
+  const route = createRouter(g, DEFAULT_SPEEDS)
+    .route(snapToNode(g, [0.01, 0])!.node, snapToNode(g, [0, 0])!.node)!;
+  assert.deepEqual(pathCoordinates(g, route), [[0.01, 0], [0.005, 0.004], [0, 0]]);
+});
+
+test('pathCoordinates joins edges without repeating the shared junction', () => {
+  const g = buildRoadGraph({
+    type: 'FeatureCollection',
+    features: [
+      { type: 'Feature', properties: { roadClass: 'minor' }, geometry: { type: 'LineString', coordinates: [[0, 0], [0.01, 0]] } },
+      { type: 'Feature', properties: { roadClass: 'minor' }, geometry: { type: 'LineString', coordinates: [[0.01, 0], [0.02, 0]] } },
+    ],
+  }, { keepGeometry: true });
+  const route = createRouter(g, DEFAULT_SPEEDS)
+    .route(snapToNode(g, [0, 0])!.node, snapToNode(g, [0.02, 0])!.node)!;
+  assert.deepEqual(pathCoordinates(g, route), [[0, 0], [0.01, 0], [0.02, 0]]);
+});
+
+test('pathCoordinates falls back to junction nodes when geometry was not kept', () => {
+  const g = buildRoadGraph({
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: { roadClass: 'minor' },
+      geometry: { type: 'LineString', coordinates: [[0, 0], [0.005, 0.004], [0.01, 0]] } }],
+  });
+  const route = createRouter(g, DEFAULT_SPEEDS)
+    .route(snapToNode(g, [0, 0])!.node, snapToNode(g, [0.01, 0])!.node)!;
+  assert.deepEqual(pathCoordinates(g, route), [[0, 0], [0.01, 0]]);
 });

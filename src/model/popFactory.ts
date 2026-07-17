@@ -1,14 +1,12 @@
 import type { Coordinate } from '../types/core';
 import type { DemandData, Pop } from '../types/game-state';
 import type { InducedDemandConfig } from './config';
-import { haversine } from './geo';
 import { commuteTimesFor, DEFAULT_SLOT_SET, type SlotSet } from './commuteTimes';
+import { DEFAULT_DRIVING_MODEL, type DrivingModel } from './drivingModel';
+import { INDUCED_PREFIX, isInduced } from './inducedId';
 
-export const INDUCED_PREFIX = 'induced:';
-
-export function isInduced(popId: string): boolean {
-  return popId.startsWith(INDUCED_PREFIX);
-}
+// Re-exported: these were part of popFactory's surface before the split.
+export { INDUCED_PREFIX, isInduced };
 
 /**
  * Build a 200-person induced pop. `lastCommute` and `drivingPath` are left for
@@ -24,16 +22,17 @@ export function makeInducedPop(
   jobLoc: Coordinate,
   cfg: InducedDemandConfig,
   slots: SlotSet = DEFAULT_SLOT_SET,
+  driving: DrivingModel = DEFAULT_DRIVING_MODEL,
 ): Pop {
-  const drivingDistance = haversine(resLoc, jobLoc) * cfg.DETOUR_FACTOR;
+  const { distance, seconds } = driving.estimate(id, residenceId, jobId, resLoc, jobLoc);
   const { homeDepartureTime, workDepartureTime } = commuteTimesFor(id, jobId, slots);
   return {
     id,
     size: cfg.POP_SIZE,
     residenceId,
     jobId,
-    drivingDistance,
-    drivingSeconds: drivingDistance / cfg.DRIVE_SPEED,
+    drivingDistance: distance,
+    drivingSeconds: seconds,
     homeDepartureTime,
     workDepartureTime,
   } as Pop;
@@ -47,11 +46,12 @@ export function addInducedPop(
   id: string,
   cfg: InducedDemandConfig,
   slots: SlotSet = DEFAULT_SLOT_SET,
+  driving: DrivingModel = DEFAULT_DRIVING_MODEL,
 ): boolean {
   const res = dd.points.get(residenceId);
   const job = dd.points.get(jobId);
   if (!res || !job) return false;
-  dd.popsMap.set(id, makeInducedPop(id, residenceId, jobId, res.location, job.location, cfg, slots));
+  dd.popsMap.set(id, makeInducedPop(id, residenceId, jobId, res.location, job.location, cfg, slots, driving));
   res.popIds.push(id);
   job.popIds.push(id);
   res.residents += cfg.POP_SIZE;

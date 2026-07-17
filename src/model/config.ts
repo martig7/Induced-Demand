@@ -33,10 +33,6 @@ export interface InducedDemandConfig {
   BETA: number;
   /** Gravity distance floor (m). */
   DIST_MIN: number;
-  /** Default home departure time for a new pop (seconds into day). */
-  DEFAULT_HOME_DEPART_SEC: number;
-  /** Default work departure time for a new pop (seconds into day). */
-  DEFAULT_WORK_DEPART_SEC: number;
 }
 
 export const DEFAULT_CONFIG: InducedDemandConfig = {
@@ -56,6 +52,4 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   DETOUR_FACTOR: 1.3,
   BETA: 2.0,
   DIST_MIN: 100,
-  DEFAULT_HOME_DEPART_SEC: 8 * 3600,
-  DEFAULT_WORK_DEPART_SEC: 17 * 3600,
 };

@@ -536,12 +536,22 @@ export interface ModdingAPI {
   // ---------------------------------------------------------------------------
 
   popTiming: {
-    /** Get the current commute time ranges. */
+    /** Get the current commute time ranges (the game's full time-of-day table). */
     getCommuteTimeRanges(): CommuteTimeRange[];
     /** Set custom commute time ranges. Hours in 24-hour format (0-23). */
     setCommuteTimeRanges(ranges: CommuteTimeRange[]): void;
     /** Reset commute time ranges to defaults. */
     resetCommuteTimeRanges(): void;
+    /**
+     * Flattening applied to university (`UNI_`) pops' departure distribution,
+     * 0..1. Game default 0.3. @added — feature-detect before calling.
+     */
+    getStudentDampening?(): number;
+    /**
+     * Flattening applied to airport (`AIR_`) pops' departure distribution, 0..1.
+     * Game default 0.5 (also mirrored). @added — feature-detect before calling.
+     */
+    getAirportDampening?(): number;
   };
 
   // ---------------------------------------------------------------------------

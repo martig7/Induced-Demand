@@ -14,6 +14,7 @@ import {
   mergePendingRemovals, newLedger, type LedgerState, type KVStore,
 } from './model/ledger';
 import { parseDanglingInducedMovementId, repairDanglingMovement } from './model/movementRepair';
+import { buildSlotSet, DEFAULT_SLOT_SET, type SlotSet } from './model/commuteTimes';
 import { classifyGameLoad, markerForLoad, observeElapsed, type LoadMarker } from './model/loadGuard';
 import { buildOverlay } from './overlay/featureCollection';
 import { buildHistoryOverlay } from './overlay/historyCollection';
@@ -198,6 +199,29 @@ if (!api) {
   /** Live routes only — in-progress (temp-parent) routes do not induce demand. */
   function inductionStations(): Station[] {
     return api.gameState.getStations({ includeTempRoutes: false });
+  }
+
+  /**
+   * Commute-time slots built from the game's LIVE time-of-day table, so induced pops
+   * depart on the same distribution as native ones — and follow any customization the
+   * player or another mod applies. Falls back to the game's default table.
+   */
+  function liveSlotSet(): SlotSet {
+    try {
+      const pt = api.popTiming;
+      const ranges = pt?.getCommuteTimeRanges?.();
+      const usable = Array.isArray(ranges) && ranges.every(
+        (r) => typeof r?.start === 'number' && typeof r?.end === 'number'
+          && typeof r?.homeDemandMultiplier === 'number' && typeof r?.workDemandMultiplier === 'number',
+      );
+      return buildSlotSet({
+        ranges: usable ? ranges : undefined,
+        studentDampening: pt?.getStudentDampening?.(),
+        airportDampening: pt?.getAirportDampening?.(),
+      });
+    } catch {
+      return DEFAULT_SLOT_SET;
+    }
   }
 
   /**
@@ -417,7 +441,8 @@ if (!api) {
     // Restore any induced pops the save/sim dropped (see reconcileInducedPops). Must run AFTER
     // reconcileBaselines/bumpSeq: baselines are then already fixed, so the pops we re-add here
     // can't be mistaken for baseline demand. Idempotent — pops still present are left untouched.
-    const restored = reconcileInducedPops(dd, ledger, DEFAULT_CONFIG);
+    const slots = liveSlotSet();
+    const restored = reconcileInducedPops(dd, ledger, DEFAULT_CONFIG, slots);
     if (restored > 0) console.log(`${TAG} restored ${restored} induced pops missing from the save`);
     // Retired pops must stay resolvable by id (saves keep movements, strip pops).
     restoreTombstoneStubs(dd, ledger, DEFAULT_CONFIG);
@@ -595,7 +620,7 @@ if (!api) {
     }
     let result: DayResult = { added: 0, removed: 0, deltas: {} };
     try {
-      result = runDay(dd, stations, ledger, DEFAULT_CONFIG, makeRng(hashSeed(currentCity(), day)));
+      result = runDay(dd, stations, ledger, DEFAULT_CONFIG, makeRng(hashSeed(currentCity(), day)), liveSlotSet());
     } catch (e) {
       console.error(`${TAG} runDay failed on day ${day}`, e);
     }

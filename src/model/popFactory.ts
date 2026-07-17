@@ -2,6 +2,7 @@ import type { Coordinate } from '../types/core';
 import type { DemandData, Pop } from '../types/game-state';
 import type { InducedDemandConfig } from './config';
 import { haversine } from './geo';
+import { commuteTimesFor, DEFAULT_SLOT_SET, type SlotSet } from './commuteTimes';
 
 export const INDUCED_PREFIX = 'induced:';
 
@@ -12,6 +13,8 @@ export function isInduced(popId: string): boolean {
 /**
  * Build a 200-person induced pop. `lastCommute` and `drivingPath` are left for
  * the game sim to populate (see spec §13.4), so we cast the literal to Pop.
+ * Departure times are drawn from the game's own commute distribution, seeded by
+ * the pop id so they survive a restore unchanged (see model/commuteTimes).
  */
 export function makeInducedPop(
   id: string,
@@ -20,8 +23,10 @@ export function makeInducedPop(
   resLoc: Coordinate,
   jobLoc: Coordinate,
   cfg: InducedDemandConfig,
+  slots: SlotSet = DEFAULT_SLOT_SET,
 ): Pop {
   const drivingDistance = haversine(resLoc, jobLoc) * cfg.DETOUR_FACTOR;
+  const { homeDepartureTime, workDepartureTime } = commuteTimesFor(id, jobId, slots);
   return {
     id,
     size: cfg.POP_SIZE,
@@ -29,8 +34,8 @@ export function makeInducedPop(
     jobId,
     drivingDistance,
     drivingSeconds: drivingDistance / cfg.DRIVE_SPEED,
-    homeDepartureTime: cfg.DEFAULT_HOME_DEPART_SEC,
-    workDepartureTime: cfg.DEFAULT_WORK_DEPART_SEC,
+    homeDepartureTime,
+    workDepartureTime,
   } as Pop;
 }
 
@@ -41,11 +46,12 @@ export function addInducedPop(
   jobId: string,
   id: string,
   cfg: InducedDemandConfig,
+  slots: SlotSet = DEFAULT_SLOT_SET,
 ): boolean {
   const res = dd.points.get(residenceId);
   const job = dd.points.get(jobId);
   if (!res || !job) return false;
-  dd.popsMap.set(id, makeInducedPop(id, residenceId, jobId, res.location, job.location, cfg));
+  dd.popsMap.set(id, makeInducedPop(id, residenceId, jobId, res.location, job.location, cfg, slots));
   res.popIds.push(id);
   job.popIds.push(id);
   res.residents += cfg.POP_SIZE;

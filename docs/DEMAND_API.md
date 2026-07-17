@@ -145,6 +145,73 @@ Time-of-day demand curves (`getTimeOfDayRanges`) use `homeDemandMultiplier` /
 `workDemandMultiplier` per range (VERY_LOW 0.15 … HIGH 2.5). These are **global
 rush-hour curves**, not per-point levers — useful context, not a mod hook.
 
+## Commute departure times (verified 2026-07-12)
+
+How the game assigns `homeDepartureTime` / `workDepartureTime`, from
+`assignCommuteTimes` → `generateTimeSlots` → `generateDepartureTimeBasedOnDemand`
+(v1.4.10 bundle). Emulated in `src/model/commuteTimes.ts`.
+
+**Time-of-day table** (`TIME_OF_DAY_RANGES`, live via
+`api.popTiming.getCommuteTimeRanges()`). Multipliers:
+`VERY_LOW 0.15, LOW 0.3, LOW_MEDIUM 0.8, MEDIUM 1, HIGH 2.5`.
+
+| hours | key | home× | work× |
+|-------|-----|-------|-------|
+| 0-3 | Night | 0.15 | 0.15 |
+| 3-6 | EarlyMorning | 0.3 | 0.3 |
+| 6-7 | EarlyMorningRush | 1 | 0.3 |
+| 7-10 | PeakMorningRush | **2.5** | 0.3 |
+| 10-11 | LateMorningRush | 1 | 0.8 |
+| 11-15 | Midday | 0.8 | 0.8 |
+| 15-16 | EarlyEveningRush | 0.8 | 1 |
+| 16-19 | PeakEveningRush | 0.3 | **2.5** |
+| 19-20 | LateEveningRush | 0.3 | 1 |
+| 20-23 | EarlyNight | 0.3 | 0.3 |
+| 23-24 | LateNight | 0.15 | 0.15 |
+
+**Slot construction.** Per-hour multiplier = `max` over covering ranges, then
+optional dampening (`m*(1-d) + avg*d`) and mirroring (`home = work = mean`), then
+contiguous equal hours are run-length-encoded into bins, then each bin is
+normalized to `multiplier × width / Σ(multiplier × width)`. Note the RLE **merges
+adjacent equal-multiplier bands**, so the resulting bins are not the table rows —
+e.g. home 11-15 and 15-16 (both 0.8) become one 11-16 bin.
+
+Resulting default bins (probability of a departure landing in the bin):
+
+```
+home: 0-3 2.63%  3-6 5.26%  6-7 5.85%  7-10 43.86%  10-11 5.85%  11-16 23.39%  16-23 12.28%  23-24 0.88%
+work: 0-3 2.63%  3-10 12.28%  10-15 23.39%  15-16 5.85%  16-19 43.86%  19-20 5.85%  20-23 5.26%  23-24 0.88%
+```
+
+**Drawing one departure:** pick a bin by probability, pick an hour uniformly
+inside it, a uniform second inside that hour, add jitter `(rand−0.5)×900` s
+(±7.5 min), clamp to `[startHour×3600, endHour×3600 − 1]`. So the distribution is
+piecewise-uniform per bin, NOT peaked within a bin.
+
+**Pairing rules:** home is drawn once; work is redrawn (up to 100×, then the home
+time is redrawn) until `|work − home| ≥ 90 min` (`MIN_GAP_MINUTES = 90`) and
+`work !== home`. There is **no ordering constraint** — work-before-home pops are
+normal and the game produces them too (night shifts).
+
+**Pop kinds** are selected by **`jobId` prefix**, not the residence:
+
+| prefix | slots |
+|--------|-------|
+| `AIR_` | dampened by `getAirportDampening()` (default **0.5**) **and mirrored** |
+| `UNI_` | dampened by `getStudentDampening()` (default **0.3**) |
+| other | the plain table |
+
+**`popTiming` API shape correction:** the docs describe `CommuteTimeRange` as
+`{start, end}` with defaults `[{7,9},{17,19}]`. That is wrong:
+`getCommuteTimeRanges()` returns the 11 full-day bands above including both
+multipliers, and `setCommuteTimeRanges` rejects entries missing any of the four
+numeric fields. `popTiming` also exposes `get/setStudentDampening`,
+`get/setAirportDampening`, `resetCommuteDampening` (undocumented in our v1.0.0
+typings; now marked optional + feature-detected).
+
+Anchors: `assignCommuteTimes`, `generateTimeSlots`,
+`generateDepartureTimeBasedOnDemand`, `TIME_OF_DAY_RANGES`, `MIN_GAP_MINUTES`.
+
 ## API delta vs. the ported v1.0.0 model
 
 Added/corrected in `src/types` during this pass (all `@added`/`@verified`):

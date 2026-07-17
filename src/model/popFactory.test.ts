@@ -85,3 +85,25 @@ test('ensureTombstoneStub creates a size-0 stub', () => {
   assert.equal(dd.points.get('H')!.residents, 0);
   assert.deepEqual(dd.points.get('H')!.popIds, []);
 });
+
+test('addInducedPop gives each pop distributed commute times, not a fixed 8/17', () => {
+  const times = new Set<string>();
+  for (let i = 0; i < 40; i++) {
+    const dd = demand();
+    addInducedPop(dd, 'H', 'W', `induced:${i}`, DEFAULT_CONFIG);
+    const pop = dd.popsMap.get(`induced:${i}`)!;
+    assert.ok(pop.homeDepartureTime >= 0 && pop.homeDepartureTime < 86400);
+    assert.ok(pop.workDepartureTime >= 0 && pop.workDepartureTime < 86400);
+    times.add(`${pop.homeDepartureTime}/${pop.workDepartureTime}`);
+  }
+  assert.ok(times.size > 30, `expected varied departure times, got ${times.size} distinct`);
+});
+
+test('addInducedPop times are stable for a given pop id (restore keeps its commute)', () => {
+  const first = demand();
+  addInducedPop(first, 'H', 'W', 'induced:9', DEFAULT_CONFIG);
+  const again = demand();
+  addInducedPop(again, 'H', 'W', 'induced:9', DEFAULT_CONFIG);
+  assert.equal(first.popsMap.get('induced:9')!.homeDepartureTime, again.popsMap.get('induced:9')!.homeDepartureTime);
+  assert.equal(first.popsMap.get('induced:9')!.workDepartureTime, again.popsMap.get('induced:9')!.workDepartureTime);
+});

@@ -3,6 +3,7 @@ import type { InducedDemandConfig } from './config';
 import {
   INDUCED_PREFIX, isInduced, addInducedPop, detachInducedPop, ensureTombstoneStub,
 } from './popFactory';
+import { DEFAULT_SLOT_SET, type SlotSet } from './commuteTimes';
 
 export interface PointLedger {
   baselineResidents: number;
@@ -137,6 +138,7 @@ export function reconcileInducedPops(
   dd: DemandData,
   ledger: LedgerState,
   cfg: InducedDemandConfig,
+  slots: SlotSet = DEFAULT_SLOT_SET,
 ): number {
   for (const pop of dd.popsMap.values()) {
     // Adopt only LIVE pops (size > 0): a size-0 entry is an inert retired stub —
@@ -157,7 +159,7 @@ export function reconcileInducedPops(
       ensureTombstoneStub(dd, id, rec, cfg);
       continue;
     }
-    if (addInducedPop(dd, rec.residenceId, rec.jobId, id, cfg)) restored++;
+    if (addInducedPop(dd, rec.residenceId, rec.jobId, id, cfg, slots)) restored++;
     else delete ledger.pops[id]; // endpoints gone — drop the stale roster entry
   }
   return restored;

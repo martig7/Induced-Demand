@@ -9,6 +9,7 @@ import { cap, logisticDelta } from './growth';
 import { reconcile, allocateInteger } from './allocate';
 import { pairByGravity } from './gravity';
 import { addInducedPop, INDUCED_PREFIX, deferInducedPopRemoval } from './popFactory';
+import { DEFAULT_SLOT_SET, type SlotSet } from './commuteTimes';
 import { clamp } from './util';
 
 /** Per-point demand changes of one day: added/removed pops at residence/job side. */
@@ -38,6 +39,8 @@ export function runDay(
   ledger: LedgerState,
   cfg: InducedDemandConfig,
   rng: () => number,
+  /** Live commute-time slots (from the game's ranges); defaults to the game's table. */
+  slots: SlotSet = DEFAULT_SLOT_SET,
 ): DayResult {
   const points = [...dd.points.values()];
   const accessStations = toAccessStations(stations);
@@ -102,7 +105,7 @@ export function runDay(
     const jobPool = expand(ids, allocateInteger(jobWeights, N, remCapJob));
     for (const [h, w] of pairByGravity(resPool, jobPool, locations, cfg, rng)) {
       const id = `${INDUCED_PREFIX}${ledger.seq}`;
-      if (addInducedPop(dd, h, w, id, cfg)) {
+      if (addInducedPop(dd, h, w, id, cfg, slots)) {
         ledger.pops[id] = { residenceId: h, jobId: w }; // track so a lost save can restore it
         ledger.seq++;
         addedThisDay.add(id);

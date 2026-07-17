@@ -212,6 +212,50 @@ typings; now marked optional + feature-detected).
 Anchors: `assignCommuteTimes`, `generateTimeSlots`,
 `generateDepartureTimeBasedOnDemand`, `TIME_OF_DAY_RANGES`, `MIN_GAP_MINUTES`.
 
+## `utils.loadCityData` is broken (v1.4.10) — read the data server instead
+
+`api.utils.loadCityData(path)` can never succeed in this build. Its body does:
+
+```js
+const { loadData } = await import("./helpers/loadData");
+```
+
+Under the game's `file://` origin that specifier resolves to a path that does not
+exist, so every call fails with:
+
+```
+GET file:///…/Programs/Subway Builder/game/reso…  net::ERR_FILE_NOT_FOUND
+[Modding API] loadCityData failed for path: /data/DEN/roads.geojson
+    TypeError: Failed to fetch dynamically imported module
+```
+
+This is path-independent: no mod can read city data through the API.
+
+**What the game itself does** (`loadData`, which the API only *wraps*): it asks the
+main process for a local HTTP data-server port and fetches the file from it,
+preferring a gzipped sibling:
+
+```js
+const port = await window.electronAPI.getDataServerPort();          // cached per page
+const base = `http://127.0.0.1:${port}${path}?useDownloaded=true`;  // USE_DOWNLOADED_CITY_DATA === true
+// for a non-.gz path, try `${path}.gz` first:
+const buf  = await (await fetch(`${base_gz}`)).arrayBuffer();
+const text = await new Response(
+  new Response(buf).body.pipeThrough(new DecompressionStream('gzip'))).text();
+JSON.parse(text);
+```
+
+Same server, same bytes, no extra privilege — it is what serves the map's own
+roads. Replicated in `src/game/cityData.ts` (`loadCityJson`). Caveat: the API route
+shows the user a "mod is reading city data" notice, and going direct skips it, so
+log what you read.
+
+`loadDataFileAbsolute` (the absolute-path branch of `loadData`) is **not** exposed
+by the preload, so that branch is dead too.
+
+Anchors: `loadCityData`, `loadData`, `resolveDataPath`, `getDataServerPort`,
+`decompressGzip`, `USE_DOWNLOADED_CITY_DATA`.
+
 ## API delta vs. the ported v1.0.0 model
 
 Added/corrected in `src/types` during this pass (all `@added`/`@verified`):

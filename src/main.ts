@@ -113,6 +113,8 @@ if (!api) {
       routing: { graph: RoadGraph; router: DrivingRouter } | null;
       speeds: Speeds | null;
       loading: boolean;
+      /** Road-graph load attempts for this city, capped by MAX_ROAD_LOAD_ATTEMPTS. */
+      attempts: number;
     };
   }
   const w = window as unknown as Record<string, number | boolean | undefined>;
@@ -144,6 +146,8 @@ if (!api) {
   const CLEAR_KEY = (city: string): string => `induceddemand:clear:${city}`;
   const LEGACY_CLEAR_KEY = 'induceddemand:clear'; // pre-1.0.3 unscoped marker
   const CLEAR_ON = '1';
+  /** Give up on a city's road data after this many failures (missing/corrupt file). */
+  const MAX_ROAD_LOAD_ATTEMPTS = 3;
 
   function ensureSession(): PersistentSession {
     let s = wSession[SESSION_KEY];
@@ -235,12 +239,21 @@ if (!api) {
   function drivingModel(): DrivingModel {
     const city = key();
     const cached = wSession[SESSION_KEY]?.driving;
-    if (cached && cached.city === city) return cached.model;
+    if (cached && cached.city === city) {
+      // Resume an attempt that never finished. A mod reload can supersede the
+      // generation that started the load, and the city entry already existing must
+      // not mean "routing is handled" — that silently left us on the donor tier.
+      if (!cached.routing && !cached.loading && (cached.attempts ?? 0) < MAX_ROAD_LOAD_ATTEMPTS
+        && city !== 'unknown') {
+        void loadRoadGraph(city);
+      }
+      return cached.model;
+    }
     // First time for this city: install the donor tier immediately (free, from the
     // pops already in memory) and start the road-graph load in the background.
     const dd = api.gameState.getDemandData();
     const model = dd ? createDrivingModel({ donors: buildDonorBands(dd) }) : DEFAULT_DRIVING_MODEL;
-    ensureSession().driving = { city, model, routing: null, speeds: null, loading: false };
+    ensureSession().driving = { city, model, routing: null, speeds: null, loading: false, attempts: 0 };
     if (city !== 'unknown') void loadRoadGraph(city);
     return model;
   }
@@ -310,9 +323,10 @@ if (!api) {
     if (!session.driving || session.driving.city !== city) return;
     if (session.driving.loading || session.driving.speeds) return; // in flight or already routing
     session.driving.loading = true;
+    session.driving.attempts = (session.driving.attempts ?? 0) + 1;
     try {
       const raw = await loadRoads(city);
-      if (!isCurrent() || !raw) return;
+      if (!raw) return;
       // Geometry is kept so the pop-details view can draw the real route (see
       // game/routePathServer); it costs ~11 MB and nothing else needs it.
       const graph = buildRoadGraph(raw as RoadFeatureCollection, { keepGeometry: true });
@@ -324,7 +338,7 @@ if (!api) {
       if (!dd) return;
       const speeds = await cachedSpeeds(city, graph, dd);
       const s = wSession[SESSION_KEY];
-      if (!isCurrent() || !s?.driving || s.driving.city !== city) return;
+      if (!s?.driving || s.driving.city !== city) return; // the player moved on
       const routing = { graph, router: createRouter(graph, speeds) };
       s.driving.model = createDrivingModel({ routing, donors: buildDonorBands(dd) });
       s.driving.routing = routing;

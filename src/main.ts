@@ -22,6 +22,7 @@ import {
 } from './model/roadGraph';
 import { createRouter, type DrivingRouter, type Speeds } from './model/router';
 import { installRoutePathFetch } from './game/routePathServer';
+import { loadCityJson, type DataServerHost } from './game/cityData';
 import { calibrateSpeedsAsync, type CalibrationPair } from './model/speedFit';
 import {
   createDrivingModel, buildDonorBands, DEFAULT_DRIVING_MODEL, type DrivingModel,
@@ -286,6 +287,23 @@ if (!api) {
     return speeds;
   }
 
+  /**
+   * The city's road network. Read straight from the game's local data server (see
+   * game/cityData): `api.utils.loadCityData` is broken in v1.4.10 — its internal
+   * `await import("./helpers/loadData")` cannot resolve under the game's file://
+   * origin, so it fails for every path. We still try it first in case a later build
+   * fixes it, since that route shows the user the city-data notice.
+   */
+  async function loadRoads(city: string): Promise<RoadFeatureCollection | null> {
+    const path = `/data/${city}/roads.geojson`;
+    console.log(`${TAG} reading ${path} to route induced pops' commutes`);
+    try {
+      const viaApi = await api.utils.loadCityData?.(path);
+      if (viaApi) return viaApi as RoadFeatureCollection;
+    } catch { /* expected on v1.4.10: broken dynamic import */ }
+    return loadCityJson<RoadFeatureCollection>(window as unknown as DataServerHost, path);
+  }
+
   /** Fetch + build the road graph, fit speeds to the city's own pops, upgrade the model. */
   async function loadRoadGraph(city: string): Promise<void> {
     const session = ensureSession();
@@ -293,7 +311,7 @@ if (!api) {
     if (session.driving.loading || session.driving.speeds) return; // in flight or already routing
     session.driving.loading = true;
     try {
-      const raw = await api.utils.loadCityData?.(`/data/${city}/roads.geojson`);
+      const raw = await loadRoads(city);
       if (!isCurrent() || !raw) return;
       // Geometry is kept so the pop-details view can draw the real route (see
       // game/routePathServer); it costs ~11 MB and nothing else needs it.

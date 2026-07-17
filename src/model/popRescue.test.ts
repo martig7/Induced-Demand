@@ -1,23 +1,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { needsRetime, rescueCommuteTimes } from './commuteRescue';
+import { needsRetime, rescueCommuteTimes, needsDrivingFix, rescueDrivingValues } from './popRescue';
 import { commuteTimesFor, buildSlotSet, DEFAULT_SLOT_SET } from './commuteTimes';
+import { DEFAULT_DRIVING_MODEL } from './drivingModel';
 import { addInducedPop } from './popFactory';
 import { DEFAULT_CONFIG } from './config';
+import type { Coordinate } from '../types/core';
 import type { DemandData, DemandPoint, Pop } from '../types/game-state';
 
 const LEGACY_HOME = 8 * 3600;
 const LEGACY_WORK = 17 * 3600;
 
-function point(id: string): DemandPoint {
+/** H at the origin, W ~1.11 km east — far enough for driving values to be meaningful. */
+const HOME_LOC: Coordinate = [0, 0];
+const WORK_LOC: Coordinate = [0.01, 0];
+function point(id: string, location: Coordinate): DemandPoint {
   return {
-    id, location: [0, 0], residents: 0, jobs: 0, popIds: [],
+    id, location, residents: 0, jobs: 0, popIds: [],
     residentModeShare: { walking: 0, driving: 0, transit: 0, unknown: 0 },
     workerModeShare: { walking: 0, driving: 0, transit: 0, unknown: 0 },
   };
 }
 function demand(): DemandData {
-  return { points: new Map([['H', point('H')], ['W', point('W')]]), popsMap: new Map() };
+  return {
+    points: new Map([['H', point('H', HOME_LOC)], ['W', point('W', WORK_LOC)]]),
+    popsMap: new Map(),
+  };
 }
 /** A pop as older mod builds created it: every commute pinned to 8:00 / 17:00. */
 function legacyPop(dd: DemandData, id: string): Pop {
@@ -107,4 +115,66 @@ test('rescueCommuteTimes never touches pops the mod does not own', () => {
   assert.equal(rescueCommuteTimes(dd, DEFAULT_SLOT_SET), 1);
   assert.equal(base.homeDepartureTime, 1);
   assert.equal(base.workDepartureTime, 2);
+});
+
+test('needsDrivingFix flags the legacy flat 1.30 / 11 m/s values', () => {
+  const dd = demand();
+  addInducedPop(dd, 'H', 'W', 'induced:1', DEFAULT_CONFIG);
+  const pop = dd.popsMap.get('induced:1')!;
+  // What older builds wrote: haversine * 1.30, then / 11 m/s.
+  pop.drivingDistance = 1113 * 1.3;
+  pop.drivingSeconds = pop.drivingDistance / 11;
+  assert.equal(needsDrivingFix(pop, dd, DEFAULT_DRIVING_MODEL), true);
+});
+
+test('needsDrivingFix tolerates float noise but not real drift', () => {
+  const dd = demand();
+  addInducedPop(dd, 'H', 'W', 'induced:1', DEFAULT_CONFIG);
+  const pop = dd.popsMap.get('induced:1')!;
+  assert.equal(needsDrivingFix(pop, dd, DEFAULT_DRIVING_MODEL), false);
+  pop.drivingSeconds *= 1.0001; // a refit nudging speeds by 0.01% must not churn
+  assert.equal(needsDrivingFix(pop, dd, DEFAULT_DRIVING_MODEL), false);
+  pop.drivingSeconds *= 1.5;    // 50% off is real drift
+  assert.equal(needsDrivingFix(pop, dd, DEFAULT_DRIVING_MODEL), true);
+});
+
+test('needsDrivingFix ignores stubs, foreign pops and pops with vanished endpoints', () => {
+  const dd = demand();
+  addInducedPop(dd, 'H', 'W', 'induced:1', DEFAULT_CONFIG);
+  const stub = dd.popsMap.get('induced:1')!;
+  stub.drivingDistance = 1; stub.drivingSeconds = 1; stub.size = 0;
+  assert.equal(needsDrivingFix(stub, dd, DEFAULT_DRIVING_MODEL), false);
+
+  const base = { id: 'base-1', size: 200, residenceId: 'H', jobId: 'W', drivingDistance: 1, drivingSeconds: 1 } as Pop;
+  assert.equal(needsDrivingFix(base, dd, DEFAULT_DRIVING_MODEL), false);
+
+  addInducedPop(dd, 'H', 'W', 'induced:2', DEFAULT_CONFIG);
+  const orphan = dd.popsMap.get('induced:2')!;
+  orphan.residenceId = 'GONE';
+  assert.equal(needsDrivingFix(orphan, dd, DEFAULT_DRIVING_MODEL), false);
+});
+
+test('rescueDrivingValues repairs legacy pops in place and is idempotent', () => {
+  const dd = demand();
+  for (let i = 0; i < 5; i++) {
+    addInducedPop(dd, 'H', 'W', `induced:${i}`, DEFAULT_CONFIG);
+    const p = dd.popsMap.get(`induced:${i}`)!;
+    p.drivingDistance = 1113 * 1.3;
+    p.drivingSeconds = p.drivingDistance / 11;
+  }
+  const before = dd.popsMap.get('induced:0')!;
+  const residents = dd.points.get('H')!.residents;
+
+  assert.equal(rescueDrivingValues(dd, DEFAULT_DRIVING_MODEL), 5);
+  assert.equal(dd.popsMap.get('induced:0'), before, 'must mutate the same object');
+  assert.equal(dd.popsMap.size, 5);
+  assert.equal(dd.points.get('H')!.residents, residents, 'demand must not move');
+  for (let i = 0; i < 5; i++) {
+    const p = dd.popsMap.get(`induced:${i}`)!;
+    const want = DEFAULT_DRIVING_MODEL.estimate(p.id, 'H', 'W', HOME_LOC, WORK_LOC);
+    assert.ok(Math.abs(p.drivingDistance - want.distance) < 1e-6);
+    assert.ok(Math.abs(p.drivingSeconds - want.seconds) < 1e-6);
+    assert.ok(p.drivingSeconds > 0);
+  }
+  assert.equal(rescueDrivingValues(dd, DEFAULT_DRIVING_MODEL), 0);
 });

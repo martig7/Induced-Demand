@@ -107,3 +107,44 @@ test('addInducedPop times are stable for a given pop id (restore keeps its commu
   assert.equal(first.popsMap.get('induced:9')!.homeDepartureTime, again.popsMap.get('induced:9')!.homeDepartureTime);
   assert.equal(first.popsMap.get('induced:9')!.workDepartureTime, again.popsMap.get('induced:9')!.workDepartureTime);
 });
+
+// The commute worker resolves residenceId/jobId for EVERY pop in popsMap and throws
+// "Residence and/or job coords not found for pop" if either is missing — which kills
+// the whole batch. A tombstone stub must therefore always reference LIVE points, even
+// though its own record may be stale (city data updated) or unknown (a dangling
+// movement from an old build).
+const endpointsResolve = (dd: DemandData, id: string): boolean => {
+  const pop = dd.popsMap.get(id)!;
+  return dd.points.has(pop.residenceId) && dd.points.has(pop.jobId);
+};
+
+test('ensureTombstoneStub keeps endpoints resolvable when the record is stale', () => {
+  const dd = demand();
+  // The city data changed under us: these ids no longer exist.
+  ensureTombstoneStub(dd, 'induced:1', { residenceId: 'VANISHED', jobId: 'ALSO_GONE' }, DEFAULT_CONFIG);
+  assert.ok(dd.popsMap.has('induced:1'));
+  assert.ok(endpointsResolve(dd, 'induced:1'), 'stub must not reference points that do not exist');
+  assert.equal(dd.popsMap.get('induced:1')!.size, 0);
+  assert.equal(dd.points.get('H')!.residents, 0, 'a stub still adds no demand');
+  assert.deepEqual(dd.points.get('H')!.popIds, []);
+});
+
+test('ensureTombstoneStub keeps the half of a record that still resolves', () => {
+  const dd = demand();
+  ensureTombstoneStub(dd, 'induced:1', { residenceId: 'H', jobId: 'GONE' }, DEFAULT_CONFIG);
+  const pop = dd.popsMap.get('induced:1')!;
+  assert.equal(pop.residenceId, 'H', 'the surviving endpoint is kept');
+  assert.ok(endpointsResolve(dd, 'induced:1'));
+});
+
+test('ensureTombstoneStub with no record at all still resolves', () => {
+  const dd = demand();
+  ensureTombstoneStub(dd, 'induced:1', undefined, DEFAULT_CONFIG);
+  assert.ok(endpointsResolve(dd, 'induced:1'), 'an unknown pop must not poison the commute batch');
+});
+
+test('ensureTombstoneStub creates nothing when there are no demand points to reference', () => {
+  const empty: DemandData = { points: new Map(), popsMap: new Map() };
+  assert.equal(ensureTombstoneStub(empty, 'induced:1', undefined, DEFAULT_CONFIG), false);
+  assert.equal(empty.popsMap.size, 0);
+});

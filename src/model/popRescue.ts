@@ -17,7 +17,9 @@
  */
 import type { Coordinate } from '../types/core';
 import type { DemandData, Pop } from '../types/game-state';
+import type { InducedDemandConfig } from './config';
 import { isInduced } from './inducedId';
+import { detachInducedPop } from './popFactory';
 import { commuteTimesFor, DEFAULT_SLOT_SET, type SlotSet } from './commuteTimes';
 import { DEFAULT_DRIVING_MODEL, type DrivingModel } from './drivingModel';
 
@@ -94,6 +96,36 @@ export function rescueDrivingValues(
     const want = driving.estimate(pop.id, pop.residenceId, pop.jobId, ends.res, ends.job);
     pop.drivingDistance = want.distance;
     pop.drivingSeconds = want.seconds;
+    fixed++;
+  }
+  return fixed;
+}
+
+/**
+ * Repair induced pops whose endpoints no longer resolve.
+ *
+ * The commute worker looks up `residenceId`/`jobId` for EVERY pop in `popsMap` and
+ * throws "Residence and/or job coords not found for pop" if either is missing, which
+ * aborts the whole batch — so one orphan breaks the simulation for everyone. Pops can
+ * be orphaned by a city data update that removes points (Denver went 5566 → 5532), or
+ * by stubs an older build wrote with empty ids when it had no record.
+ *
+ * An orphan cannot be a commuter any more, so it is detached (its demand removed from
+ * whichever endpoint survived) and re-anchored to live points as an inert stub. It is
+ * never deleted: a movement may still reference the id (see model/movementRepair).
+ */
+export function rescueOrphanedPops(dd: DemandData, cfg: InducedDemandConfig): number {
+  const anchor = dd.points.values().next().value;
+  if (!anchor) return 0; // no points to reference — nothing safe to do
+  let fixed = 0;
+  for (const pop of dd.popsMap.values()) {
+    if (!isInduced(pop.id)) continue;
+    const res = dd.points.get(pop.residenceId);
+    const job = dd.points.get(pop.jobId);
+    if (res && job) continue;
+    detachInducedPop(dd, pop.id, cfg); // reverse demand on the surviving endpoint; size → 0
+    pop.residenceId = (res ?? job ?? anchor).id;
+    pop.jobId = (job ?? res ?? anchor).id;
     fixed++;
   }
   return fixed;

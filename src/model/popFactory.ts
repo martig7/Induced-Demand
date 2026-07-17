@@ -115,11 +115,20 @@ export function ensureTombstoneStub(
   cfg: InducedDemandConfig,
 ): boolean {
   if (!isInduced(id) || dd.popsMap.has(id)) return false;
+  // A stub MUST reference live demand points. The commute worker resolves every pop's
+  // residenceId/jobId against the point map and throws "Residence and/or job coords
+  // not found for pop" — killing the entire batch — if either is missing. Our record
+  // can easily be stale (a city data update removed the point; DEN went 5566 → 5532)
+  // or absent entirely (a dangling movement from a build that hard-deleted pops), so
+  // resolve what we can and anchor the rest to a point that exists. The stub is size 0
+  // and unlinked from popIds, so borrowing a point costs nothing in demand or riders.
   const res = rec ? dd.points.get(rec.residenceId) : undefined;
   const job = rec ? dd.points.get(rec.jobId) : undefined;
-  const resLoc = res?.location ?? job?.location ?? ([0, 0] as Coordinate);
-  const jobLoc = job?.location ?? resLoc;
-  const stub = makeInducedPop(id, rec?.residenceId ?? '', rec?.jobId ?? '', resLoc, jobLoc, cfg);
+  const anchor = res ?? job ?? dd.points.values().next().value;
+  if (!anchor) return false; // no points at all — nothing safe to point at
+  const resPoint = res ?? anchor;
+  const jobPoint = job ?? anchor;
+  const stub = makeInducedPop(id, resPoint.id, jobPoint.id, resPoint.location, jobPoint.location, cfg);
   stub.size = 0; // inert: nothing in the game divides by a pop's size — it is only summed
   dd.popsMap.set(id, stub);
   return true;

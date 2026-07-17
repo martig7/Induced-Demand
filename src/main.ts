@@ -16,7 +16,7 @@ import {
 } from './model/ledger';
 import { parseDanglingInducedMovementId, repairDanglingMovement } from './model/movementRepair';
 import { buildSlotSet, DEFAULT_SLOT_SET, type SlotSet } from './model/commuteTimes';
-import { rescueCommuteTimes, rescueDrivingValues } from './model/popRescue';
+import { rescueCommuteTimes, rescueDrivingValues, rescueOrphanedPops } from './model/popRescue';
 import {
   buildRoadGraph, snapToNode, pathCoordinates, type RoadGraph, type RoadFeatureCollection,
 } from './model/roadGraph';
@@ -643,6 +643,11 @@ if (!api) {
     if (restored > 0) console.log(`${TAG} restored ${restored} induced pops missing from the save`);
     // Retired pops must stay resolvable by id (saves keep movements, strip pops).
     restoreTombstoneStubs(dd, ledger, DEFAULT_CONFIG);
+    // A pop whose endpoints vanished (city data update, or a stub an older build wrote
+    // with empty ids) makes the commute worker throw for the WHOLE batch. Re-anchor
+    // them before the simulation next runs.
+    const orphans = rescueOrphanedPops(dd, DEFAULT_CONFIG);
+    if (orphans > 0) console.log(`${TAG} re-anchored ${orphans} induced pops whose demand points no longer exist`);
     // Repair pops holding stale commute times (older builds pinned every commute to
     // 8:00/17:00). Retimes in place — never re-creates a pop (see model/commuteRescue).
     const retimed = rescueCommuteTimes(dd, slots);

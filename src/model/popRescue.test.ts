@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { needsRetime, rescueCommuteTimes, needsDrivingFix, rescueDrivingValues } from './popRescue';
+import {
+  needsRetime, rescueCommuteTimes, needsDrivingFix, rescueDrivingValues, rescueOrphanedPops,
+} from './popRescue';
 import { commuteTimesFor, buildSlotSet, DEFAULT_SLOT_SET } from './commuteTimes';
 import { DEFAULT_DRIVING_MODEL } from './drivingModel';
 import { addInducedPop } from './popFactory';
@@ -177,4 +179,45 @@ test('rescueDrivingValues repairs legacy pops in place and is idempotent', () =>
     assert.ok(p.drivingSeconds > 0);
   }
   assert.equal(rescueDrivingValues(dd, DEFAULT_DRIVING_MODEL), 0);
+});
+
+test('rescueOrphanedPops re-anchors pops whose endpoints vanished from the city data', () => {
+  const dd = demand();
+  addInducedPop(dd, 'H', 'W', 'induced:1', DEFAULT_CONFIG);
+  // A city data update removed W: the pop now poisons every commute batch.
+  dd.points.delete('W');
+  assert.equal(rescueOrphanedPops(dd, DEFAULT_CONFIG), 1);
+  const pop = dd.popsMap.get('induced:1')!;
+  assert.ok(dd.points.has(pop.residenceId) && dd.points.has(pop.jobId), 'endpoints must resolve');
+  assert.equal(pop.size, 0, 'an orphan can no longer be a live commuter');
+  assert.ok(dd.popsMap.has('induced:1'), 'but it must stay: movements may still reference it');
+  // Its demand is removed from the endpoint that DID survive.
+  assert.equal(dd.points.get('H')!.residents, 0);
+  assert.deepEqual(dd.points.get('H')!.popIds, []);
+  assert.equal(rescueOrphanedPops(dd, DEFAULT_CONFIG), 0, 'idempotent');
+});
+
+test('rescueOrphanedPops leaves healthy pops and foreign pops alone', () => {
+  const dd = demand();
+  addInducedPop(dd, 'H', 'W', 'induced:1', DEFAULT_CONFIG);
+  const base = { id: 'base-1', size: 200, residenceId: 'GONE', jobId: 'ALSO_GONE' } as Pop;
+  dd.popsMap.set('base-1', base);
+  assert.equal(rescueOrphanedPops(dd, DEFAULT_CONFIG), 0);
+  assert.equal(dd.popsMap.get('induced:1')!.size, 200, 'a healthy pop is untouched');
+  assert.equal(base.residenceId, 'GONE', 'not our pop, not our problem');
+});
+
+test('rescueOrphanedPops repairs a stub written by an older build', () => {
+  const dd = demand();
+  // What the previous build produced when it had no record: empty endpoint ids.
+  dd.popsMap.set('induced:9', { id: 'induced:9', size: 0, residenceId: '', jobId: '' } as Pop);
+  assert.equal(rescueOrphanedPops(dd, DEFAULT_CONFIG), 1);
+  const pop = dd.popsMap.get('induced:9')!;
+  assert.ok(dd.points.has(pop.residenceId) && dd.points.has(pop.jobId));
+  assert.equal(pop.size, 0);
+});
+
+test('rescueOrphanedPops does nothing when the city has no points', () => {
+  const empty: DemandData = { points: new Map(), popsMap: new Map([['induced:1', { id: 'induced:1', size: 0, residenceId: '', jobId: '' } as Pop]]) };
+  assert.equal(rescueOrphanedPops(empty, DEFAULT_CONFIG), 0);
 });

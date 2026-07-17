@@ -1,7 +1,7 @@
 # Driving distance, time and directions for induced pops — design plan (v2)
 
 **Date:** 2026-07-12
-**Status:** proposed (not yet approved)
+**Status:** phases 1 and 2 built (2026-07-17); phase 3 deliberately not built
 **Supersedes:** v1 of this file, which wrongly concluded the game never displays a
 driving path and recommended a statistical model instead of real routing.
 
@@ -181,7 +181,7 @@ existing rule extends unchanged: recompute, compare, repair **in place**. This
 retroactively fixes the ~1,400 legacy pops carrying 11 m/s values. As with
 commute times: never delete/re-add.
 
-## Directions (phase 2, optional)
+## Directions (phase 2) — BUILT
 
 With a router we can answer the request the game already makes. `window.fetch` is
 patched **narrowly**:
@@ -198,9 +198,20 @@ route per pop-details click (4.5 ms, cached). Effect: clicking an induced pop
 draws its **real road route** in red instead of a straight line — strictly better
 than native pops, which still get the straight line.
 
-If this feels too invasive, phase 2 can be dropped without affecting phase 1;
-`drivingPath` on the pop would then remain unset (correctly, since nothing reads
-it).
+**As built** (`src/game/routePathServer.ts`, wired in `main.ts`): exactly the rules
+above. Two things the implementation added that the plan missed:
+
+- **Way geometry was needed.** The router contracts degree-2 chains, so a route's
+  junction nodes alone cut every curve — measured on Denver, drawing junction-only
+  would misstate the route length by up to **8.1%**. `buildRoadGraph` now takes
+  `{ keepGeometry: true }` and `pathCoordinates(graph, route)` reassembles the true
+  shape (drawn polyline vs routed distance: **0.000%** error over 195 real routes;
+  ~329 shape points vs ~70 junctions per route). Geometry is opt-in because it costs
+  ~50 MB of heap on Denver and only the drawing needs it.
+- The path is drawn from the demand points themselves, not the road nodes we snapped
+  to, so the line reaches the home and job markers.
+
+`pop.drivingPath` remains unset — correctly, since nothing reads it.
 
 ## Testing
 
@@ -225,11 +236,12 @@ comparison as a scratch script so it can be re-run per city.
 
 ## Staging
 
-1. **Phase 1** — graph + A* + speed fit + `drivingModel` + rescue. Fixes the
-   material mode-choice bug. Fallbacks make it safe on any city.
-2. **Phase 2** — serve `map://paths/.../induced:*` so the game draws real routes
-   for our pops.
-3. **Phase 3** — CH, only if a profile ever justifies it.
+1. **Phase 1** — DONE. graph + A* + speed fit + `drivingModel` + rescue. Validated
+   on holdout pops in DEN/NYC/SF: distance and time medians within 1%
+   (`npx tsx scripts/validateDriving.ts`).
+2. **Phase 2** — DONE. `map://paths/.../induced:*` is served, so the game draws our
+   pops' real road routes instead of a straight line.
+3. **Phase 3** — CH, still not justified at ~17 queries/day. Revisit with a profile.
 
 ## Open questions
 

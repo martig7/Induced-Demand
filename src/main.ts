@@ -2,6 +2,7 @@
  * Induced Demand — entry point. Wires the per-day model engine to the game hooks.
  * Reads mode share + catchment; writes only demand (residents/jobs/pops).
  */
+import type { Coordinate } from './types/core';
 import type { DemandData, Station } from './types/game-state';
 import { runDay, type DayResult } from './model/engine';
 import { pushDayHistory, type DayHistoryEntry } from './model/history';
@@ -16,8 +17,11 @@ import {
 import { parseDanglingInducedMovementId, repairDanglingMovement } from './model/movementRepair';
 import { buildSlotSet, DEFAULT_SLOT_SET, type SlotSet } from './model/commuteTimes';
 import { rescueCommuteTimes, rescueDrivingValues } from './model/popRescue';
-import { buildRoadGraph, type RoadGraph, type RoadFeatureCollection } from './model/roadGraph';
-import { createRouter, type Speeds } from './model/router';
+import {
+  buildRoadGraph, snapToNode, pathCoordinates, type RoadGraph, type RoadFeatureCollection,
+} from './model/roadGraph';
+import { createRouter, type DrivingRouter, type Speeds } from './model/router';
+import { installRoutePathFetch } from './game/routePathServer';
 import { calibrateSpeedsAsync, type CalibrationPair } from './model/speedFit';
 import {
   createDrivingModel, buildDonorBands, DEFAULT_DRIVING_MODEL, type DrivingModel,
@@ -102,7 +106,13 @@ if (!api) {
     /** Rolling per-day pop-change history for the current city (see model/history). */
     history?: { city: string; days: DayHistoryEntry[] };
     /** Road graph + fitted driving model, per city (see model/drivingModel). */
-    driving?: { city: string; model: DrivingModel; speeds: Speeds | null; loading: boolean };
+    driving?: {
+      city: string;
+      model: DrivingModel;
+      routing: { graph: RoadGraph; router: DrivingRouter } | null;
+      speeds: Speeds | null;
+      loading: boolean;
+    };
   }
   const w = window as unknown as Record<string, number | boolean | undefined>;
   const wSession = window as unknown as Record<string, PersistentSession | undefined>;
@@ -229,7 +239,7 @@ if (!api) {
     // pops already in memory) and start the road-graph load in the background.
     const dd = api.gameState.getDemandData();
     const model = dd ? createDrivingModel({ donors: buildDonorBands(dd) }) : DEFAULT_DRIVING_MODEL;
-    ensureSession().driving = { city, model, speeds: null, loading: false };
+    ensureSession().driving = { city, model, routing: null, speeds: null, loading: false };
     if (city !== 'unknown') void loadRoadGraph(city);
     return model;
   }
@@ -285,7 +295,9 @@ if (!api) {
     try {
       const raw = await api.utils.loadCityData?.(`/data/${city}/roads.geojson`);
       if (!isCurrent() || !raw) return;
-      const graph = buildRoadGraph(raw as RoadFeatureCollection);
+      // Geometry is kept so the pop-details view can draw the real route (see
+      // game/routePathServer); it costs ~11 MB and nothing else needs it.
+      const graph = buildRoadGraph(raw as RoadFeatureCollection, { keepGeometry: true });
       if (graph.edgeCount === 0) {
         console.log(`${TAG} ${city}: no usable road data — keeping the statistical driving model`);
         return;
@@ -295,10 +307,9 @@ if (!api) {
       const speeds = await cachedSpeeds(city, graph, dd);
       const s = wSession[SESSION_KEY];
       if (!isCurrent() || !s?.driving || s.driving.city !== city) return;
-      s.driving.model = createDrivingModel({
-        routing: { graph, router: createRouter(graph, speeds) },
-        donors: buildDonorBands(dd),
-      });
+      const routing = { graph, router: createRouter(graph, speeds) };
+      s.driving.model = createDrivingModel({ routing, donors: buildDonorBands(dd) });
+      s.driving.routing = routing;
       s.driving.speeds = speeds;
       console.log(
         `${TAG} ${city}: routing on ${graph.nodeCount} road nodes — fitted speeds `
@@ -317,6 +328,34 @@ if (!api) {
       const s = wSession[SESSION_KEY];
       if (s?.driving && s.driving.city === city) s.driving.loading = false;
     }
+  }
+
+  /**
+   * The road route for one of OUR pops, for the game's pop-details view.
+   *
+   * The game already asks for this (`map://paths/<city>/<popId>`) and falls back to a
+   * straight line when the request fails — which, in this build, it always does. We
+   * answer for induced pops only; see game/routePathServer for the interception rules.
+   * Returns null (→ the straight line) whenever we cannot do better.
+   */
+  function inducedRoutePath(city: string, popId: string): Coordinate[] | null {
+    if (city !== key()) return null;
+    const driving = wSession[SESSION_KEY]?.driving;
+    if (!driving || driving.city !== city || !driving.routing) return null; // graph not ready
+    const dd = api.gameState.getDemandData();
+    const pop = dd?.popsMap.get(popId);
+    if (!dd || !pop || pop.size <= 0) return null; // unknown, or a retired stub
+    const res = dd.points.get(pop.residenceId);
+    const job = dd.points.get(pop.jobId);
+    if (!res || !job) return null;
+    const { graph, router } = driving.routing;
+    const from = snapToNode(graph, res.location);
+    const to = snapToNode(graph, job.location);
+    if (!from || !to) return null;
+    const route = router.route(from.node, to.node);
+    if (!route) return null;
+    // Draw from the demand point itself, not the road node we snapped to.
+    return [res.location, ...pathCoordinates(graph, route), job.location];
   }
 
   /**
@@ -477,6 +516,13 @@ if (!api) {
 
   persistentUi.resetInducedDemand = resetInducedDemand;
   refreshPanelRender();
+
+  // Answer the game's own request for our pops' driving routes.
+  try {
+    installRoutePathFetch(window, (city, popId) => (isCurrent() ? inducedRoutePath(city, popId) : null));
+  } catch (e) {
+    console.warn(`${TAG} could not serve driving routes to the pop details view`, e);
+  }
 
   // Self-heal orphaned movements (see model/movementRepair): the game logs
   // "Pop not found for pop movement induced:N" through console.error every tick.

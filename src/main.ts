@@ -15,7 +15,13 @@ import {
 } from './model/ledger';
 import { parseDanglingInducedMovementId, repairDanglingMovement } from './model/movementRepair';
 import { buildSlotSet, DEFAULT_SLOT_SET, type SlotSet } from './model/commuteTimes';
-import { rescueCommuteTimes } from './model/commuteRescue';
+import { rescueCommuteTimes, rescueDrivingValues } from './model/popRescue';
+import { buildRoadGraph, type RoadGraph, type RoadFeatureCollection } from './model/roadGraph';
+import { createRouter, type Speeds } from './model/router';
+import { calibrateSpeedsAsync, type CalibrationPair } from './model/speedFit';
+import {
+  createDrivingModel, buildDonorBands, DEFAULT_DRIVING_MODEL, type DrivingModel,
+} from './model/drivingModel';
 import { classifyGameLoad, markerForLoad, observeElapsed, type LoadMarker } from './model/loadGuard';
 import { buildOverlay } from './overlay/featureCollection';
 import { buildHistoryOverlay } from './overlay/historyCollection';
@@ -95,6 +101,8 @@ if (!api) {
     lastLoadedSaveName?: string | null;
     /** Rolling per-day pop-change history for the current city (see model/history). */
     history?: { city: string; days: DayHistoryEntry[] };
+    /** Road graph + fitted driving model, per city (see model/drivingModel). */
+    driving?: { city: string; model: DrivingModel; speeds: Speeds | null; loading: boolean };
   }
   const w = window as unknown as Record<string, number | boolean | undefined>;
   const wSession = window as unknown as Record<string, PersistentSession | undefined>;
@@ -116,6 +124,9 @@ if (!api) {
     try { return window.localStorage; } catch { return null; }
   })();
   const LEDGER_KEY = (city: string): string => `induceddemand:ledger:${city}`;
+  // Fitted road speeds: derived from the city's data, so they only change when the
+  // city data does. Cached to skip ~4 s of routing on every later load.
+  const SPEEDS_KEY = (city: string): string => `induceddemand:speeds:${city}`;
   // Clear-demand marker: set on click, applied + consumed on the next REAL load of the
   // SAME city. Scoped per city — a global marker would clear whichever city happens to
   // load next (e.g. when the user switches city to force a full load).
@@ -200,6 +211,112 @@ if (!api) {
   /** Live routes only — in-progress (temp-parent) routes do not induce demand. */
   function inductionStations(): Station[] {
     return api.gameState.getStations({ includeTempRoutes: false });
+  }
+
+  /**
+   * Driving distance/time for induced pops. Three tiers (see model/drivingModel):
+   * the city's real road network, else resampled native pops, else measured constants.
+   *
+   * The road graph costs ~2 s to parse and build, so it loads ONCE per city, lazily,
+   * off the critical path. Pops created meanwhile use the cheaper tiers and are
+   * upgraded in place once routing is ready.
+   */
+  function drivingModel(): DrivingModel {
+    const city = key();
+    const cached = wSession[SESSION_KEY]?.driving;
+    if (cached && cached.city === city) return cached.model;
+    // First time for this city: install the donor tier immediately (free, from the
+    // pops already in memory) and start the road-graph load in the background.
+    const dd = api.gameState.getDemandData();
+    const model = dd ? createDrivingModel({ donors: buildDonorBands(dd) }) : DEFAULT_DRIVING_MODEL;
+    ensureSession().driving = { city, model, speeds: null, loading: false };
+    if (city !== 'unknown') void loadRoadGraph(city);
+    return model;
+  }
+
+  /**
+   * The city's own pops are labelled examples for model/speedFit: their endpoints plus
+   * the driving time the game's offline router produced. Sorted by id and capped so a
+   * city calibrates identically every load.
+   */
+  function calibrationPairs(dd: DemandData): CalibrationPair[] {
+    const SAMPLE = 300;
+    return [...dd.popsMap.values()]
+      .filter((p) => !p.id.startsWith(INDUCED_PREFIX) && p.drivingSeconds > 0
+        && dd.points.has(p.residenceId) && dd.points.has(p.jobId))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, SAMPLE)
+      .map((p) => ({
+        residence: dd.points.get(p.residenceId)!.location,
+        job: dd.points.get(p.jobId)!.location,
+        seconds: p.drivingSeconds,
+      }));
+  }
+
+  /**
+   * Fitted speeds for this city, from cache when possible. The fit costs ~900 A*
+   * queries; its inputs (road graph + native pops) are fixed per city data version,
+   * so the result is stable and worth persisting.
+   */
+  async function cachedSpeeds(city: string, graph: RoadGraph, dd: DemandData): Promise<Speeds> {
+    const stamp = `${graph.nodeCount}:${dd.popsMap.size}`;
+    try {
+      const raw = store?.getItem(SPEEDS_KEY(city));
+      if (raw) {
+        const cached = JSON.parse(raw) as { stamp?: string; speeds?: Speeds };
+        const s = cached.speeds;
+        if (cached.stamp === stamp && s
+          && [s.highway, s.major, s.minor].every((v) => typeof v === 'number' && v > 0)) {
+          return s;
+        }
+      }
+    } catch { /* unreadable cache — just refit */ }
+    const speeds = await calibrateSpeedsAsync(graph, calibrationPairs(dd));
+    try { store?.setItem(SPEEDS_KEY(city), JSON.stringify({ stamp, speeds })); } catch { /* quota */ }
+    return speeds;
+  }
+
+  /** Fetch + build the road graph, fit speeds to the city's own pops, upgrade the model. */
+  async function loadRoadGraph(city: string): Promise<void> {
+    const session = ensureSession();
+    if (!session.driving || session.driving.city !== city) return;
+    if (session.driving.loading || session.driving.speeds) return; // in flight or already routing
+    session.driving.loading = true;
+    try {
+      const raw = await api.utils.loadCityData?.(`/data/${city}/roads.geojson`);
+      if (!isCurrent() || !raw) return;
+      const graph = buildRoadGraph(raw as RoadFeatureCollection);
+      if (graph.edgeCount === 0) {
+        console.log(`${TAG} ${city}: no usable road data — keeping the statistical driving model`);
+        return;
+      }
+      const dd = api.gameState.getDemandData();
+      if (!dd) return;
+      const speeds = await cachedSpeeds(city, graph, dd);
+      const s = wSession[SESSION_KEY];
+      if (!isCurrent() || !s?.driving || s.driving.city !== city) return;
+      s.driving.model = createDrivingModel({
+        routing: { graph, router: createRouter(graph, speeds) },
+        donors: buildDonorBands(dd),
+      });
+      s.driving.speeds = speeds;
+      console.log(
+        `${TAG} ${city}: routing on ${graph.nodeCount} road nodes — fitted speeds `
+        + `highway ${speeds.highway.toFixed(1)}, major ${speeds.major.toFixed(1)}, `
+        + `minor ${speeds.minor.toFixed(1)} m/s`,
+      );
+      // Pops already created used a cheaper tier; upgrade them in place.
+      const fixed = rescueDrivingValues(dd, s.driving.model);
+      if (fixed > 0) {
+        console.log(`${TAG} re-estimated driving for ${fixed} induced pops`);
+        refreshNativeDemandDots();
+      }
+    } catch (e) {
+      console.warn(`${TAG} road data unavailable for ${city}; using the statistical driving model`, e);
+    } finally {
+      const s = wSession[SESSION_KEY];
+      if (s?.driving && s.driving.city === city) s.driving.loading = false;
+    }
   }
 
   /**
@@ -443,17 +560,18 @@ if (!api) {
     // reconcileBaselines/bumpSeq: baselines are then already fixed, so the pops we re-add here
     // can't be mistaken for baseline demand. Idempotent — pops still present are left untouched.
     const slots = liveSlotSet();
-    const restored = reconcileInducedPops(dd, ledger, DEFAULT_CONFIG, slots);
+    const driving = drivingModel();
+    const restored = reconcileInducedPops(dd, ledger, DEFAULT_CONFIG, slots, driving);
     if (restored > 0) console.log(`${TAG} restored ${restored} induced pops missing from the save`);
     // Retired pops must stay resolvable by id (saves keep movements, strip pops).
     restoreTombstoneStubs(dd, ledger, DEFAULT_CONFIG);
     // Repair pops holding stale commute times (older builds pinned every commute to
     // 8:00/17:00). Retimes in place — never re-creates a pop (see model/commuteRescue).
     const retimed = rescueCommuteTimes(dd, slots);
-    if (retimed > 0) {
-      console.log(`${TAG} rescued ${retimed} induced pops with stale commute times`);
-      refreshNativeDemandDots();
-    }
+    if (retimed > 0) console.log(`${TAG} rescued ${retimed} induced pops with stale commute times`);
+    const redriven = rescueDrivingValues(dd, driving);
+    if (redriven > 0) console.log(`${TAG} rescued ${redriven} induced pops with stale driving values`);
+    if (retimed > 0 || redriven > 0) refreshNativeDemandDots();
     didReconcile = true;
   }
 
@@ -628,7 +746,10 @@ if (!api) {
     }
     let result: DayResult = { added: 0, removed: 0, deltas: {} };
     try {
-      result = runDay(dd, stations, ledger, DEFAULT_CONFIG, makeRng(hashSeed(currentCity(), day)), liveSlotSet());
+      result = runDay(
+        dd, stations, ledger, DEFAULT_CONFIG,
+        makeRng(hashSeed(currentCity(), day)), liveSlotSet(), drivingModel(),
+      );
     } catch (e) {
       console.error(`${TAG} runDay failed on day ${day}`, e);
     }

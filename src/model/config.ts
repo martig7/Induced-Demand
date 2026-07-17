@@ -25,10 +25,6 @@ export interface InducedDemandConfig {
   ACCESS_CONN_FLOOR: number;
   /** Walking speed (m/s) for access walk-time. */
   WALK_SPEED: number;
-  /** Driving speed (m/s) for new-pop driving estimate. */
-  DRIVE_SPEED: number;
-  /** Straight-line -> road distance factor. */
-  DETOUR_FACTOR: number;
   /** Gravity distance-decay exponent. */
   BETA: number;
   /** Gravity distance floor (m). */
@@ -48,8 +44,6 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   CONNECTIVITY_REF: 3,
   ACCESS_CONN_FLOOR: 0.5,
   WALK_SPEED: 1.0,
-  DRIVE_SPEED: 11,
-  DETOUR_FACTOR: 1.3,
   BETA: 2.0,
   DIST_MIN: 100,
 };

@@ -62,7 +62,9 @@ export function createPerfTracker(
  */
 export const PERF_BUDGETS = {
   tier1: 100,
-  tier1Chunk: 16,
+  // One catchment is sampled atomically, so a dense station can overrun a single
+  // frame; 32 ms (one dropped frame during a background rebuild) is acceptable.
+  tier1Chunk: 32,
   tier1Total: 2000,
   tier2: 15,
   day: 50,

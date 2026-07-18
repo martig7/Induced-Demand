@@ -417,7 +417,7 @@ if (!api) {
     if (maxChunkMs > PERF_BUDGETS.tier1Chunk) {
       console.warn(`${TAG} tier1 chunk over budget: ${maxChunkMs.toFixed(1)}ms > ${PERF_BUDGETS.tier1Chunk}ms`);
     }
-    refreshHeatmap();
+    bumpHeat();
   }
 
   /**
@@ -442,7 +442,7 @@ if (!api) {
       };
       return sites;
     }, (sites) => `${sites.length} sites (sync promotion)`);
-    refreshHeatmap();
+    bumpHeat();
   }
 
   /** Mass drift beyond this fraction of city demand triggers a weight refresh. */
@@ -493,12 +493,41 @@ if (!api) {
     }, 500);
   }
 
+  // Baking the field raster is comparatively costly and MapLibre's image source
+  // aborts an in-flight updateImage when the next arrives (the AbortError spam).
+  // `refreshHeatmap` is called on EVERY store change, so coalesce to one bake per
+  // frame and skip it entirely unless the view or the field data actually moved.
+  // `heatRev` is bumped only when the heat content changes (rebuild / growth day).
+  let heatRev = 0;
+  let heatPending = false;
+  let lastHeatKey = '';
+  const rafSchedule = (fn: () => void): void => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn);
+    else setTimeout(fn, 16);
+  };
+  function bumpHeat(): void { heatRev++; refreshHeatmap(); }
   function refreshHeatmap(): void {
+    if (heatPending) return;
+    heatPending = true;
+    rafSchedule(() => {
+      heatPending = false;
+      if (isCurrent()) doHeatmapRefresh();
+    });
+  }
+  function doHeatmapRefresh(): void {
     const s = overlayStore.get();
     const view = (s.heatView ?? 'off') as HeatView;
     const f = wSession[SESSION_KEY]?.field;
-    if (view === 'off' || !f || f.city !== key()) { setHeatmapVisible(api, false); return; }
-    updateHeatmap(api, buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG));
+    if (view === 'off' || !f || f.city !== key()) {
+      setHeatmapVisible(api, false);
+      lastHeatKey = 'off';
+      return;
+    }
+    const heatKey = `${view}:${heatRev}`;
+    if (heatKey !== lastHeatKey) { // re-bake only when content changed
+      updateHeatmap(api, buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG));
+      lastHeatKey = heatKey;
+    }
     setHeatmapVisible(api, true);
   }
 
@@ -1189,7 +1218,7 @@ if (!api) {
     if (overlayStore.get().enabled) refreshOverlay();
     if (result.added > 0 || result.removed > 0 || result.newPoints > 0) refreshNativeDemandDots();
     syncPanelState();
-    refreshHeatmap();
+    bumpHeat(); // the day's growth changed pressure/access → re-bake the field
     persistSession();
     if (result.removed > 0 || result.newPoints > 0) persistLedgerToStore();
   });

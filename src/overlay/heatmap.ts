@@ -235,7 +235,14 @@ export function updateHeatmap(api: ModdingAPI, fc: HeatFeatureCollection): void 
 
   const existing = map.getSource(HEAT_SOURCE_ID);
   if (existing && typeof existing.updateImage === 'function') {
-    existing.updateImage({ url, coordinates });
+    try {
+      existing.updateImage({ url, coordinates });
+    } catch (e) {
+      // updateImage aborts the previous image load; that abort surfaces here as
+      // an AbortError. The new image still applies — swallow the abort, rethrow
+      // anything genuinely unexpected.
+      if (!(e instanceof DOMException && e.name === 'AbortError')) throw e;
+    }
     return;
   }
   try {

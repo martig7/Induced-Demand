@@ -454,6 +454,33 @@ test('recreateMaterializedPoints: existing points are left untouched', () => {
   assert.equal(dd.points.get('induced-pt:0')!.residents, 999);
 });
 
+test('composed load order: recreate -> baselines -> pops re-adds the pop without corrupting baselines', () => {
+  // The real init() sequence: materialized points are recreated (empty), baselines
+  // are derived from the husk (still empty), THEN the roster re-adds the pop's demand.
+  // Order matters: baselines must be captured at 0 for the husked induced point and
+  // at the native value for n1 BEFORE the pop re-add inflates their live counts.
+  const dd: DemandData = { points: new Map(), popsMap: new Map() };
+  dd.points.set('n1', point('n1', 500, 500));
+  const led = newLedger();
+  led.pops['induced:0'] = { residenceId: 'induced-pt:0', jobId: 'n1' };
+  led.materialized = { 'induced-pt:0': { location: [1, 2], siteId: 's' } };
+
+  recreateMaterializedPoints(dd, led); // husks induced-pt:0 at residents/jobs = 0
+  reconcileBaselines(dd, led);         // baselines captured against the husk
+  reconcileInducedPops(dd, led, DEFAULT_CONFIG); // re-adds induced:0 (+POP_SIZE each end)
+
+  // Baselines for the induced point stay 0 — its live count is entirely induced.
+  assert.equal(led.points['induced-pt:0'].baselineResidents, 0);
+  assert.equal(led.points['induced-pt:0'].baselineJobs, 0);
+  // The pop was re-added.
+  assert.ok(dd.popsMap.has('induced:0'));
+  // Live residents == the re-added pop's contribution, while baseline stayed 0.
+  assert.equal(dd.points.get('induced-pt:0')!.residents, DEFAULT_CONFIG.POP_SIZE);
+  // n1's baseline was captured (500) before the re-add; its jobs now include +POP_SIZE.
+  assert.equal(led.points['n1'].baselineJobs, 500);
+  assert.equal(dd.points.get('n1')!.jobs, 500 + DEFAULT_CONFIG.POP_SIZE);
+});
+
 test('clearAllInduced: drops materialized records, keeps ptSeq, resets densify', () => {
   const dd: DemandData = { points: new Map(), popsMap: new Map() };
   const led = newLedger();

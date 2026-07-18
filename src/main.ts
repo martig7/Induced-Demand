@@ -599,6 +599,9 @@ if (!api) {
   }
 
   function refreshOverlay(): void {
+    // Heatmap first, unconditionally: heatView is independent of the circle
+    // overlay's enabled/historyDay state, and refreshHeatmap self-guards.
+    refreshHeatmap();
     const s = overlayStore.get();
     // A selected history day takes precedence over the main overlay's On/Off.
     if (s.historyDay != null) {

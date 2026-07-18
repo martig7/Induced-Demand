@@ -39,6 +39,20 @@ import { createOverlayStore, type OverlayStore } from './overlay/state';
 import { createPanel } from './ui/panel';
 import { createHistoryPanel } from './ui/historyPanel';
 import { TOOLBAR_PANEL_ID, TOOLBAR_PLACEMENT } from './ui/toolbarPanel';
+import { buildStationGraph, type StationGraph } from './model/stationGraph';
+import {
+  stationMasses, computeOpportunities, accessAt, type StationOpportunity,
+} from './model/opportunity';
+import { fitDensity, spacingAt, massAt, type DensityFit, type FitInputPoint } from './model/densityFit';
+import { jitterPosition } from './model/sampler';
+import { buildSites, refreshSiteAccess, computeStructuralHash, type Site } from './model/field';
+import { buildWaterIndex, type WaterIndex, type OceanDepthFile } from './game/waterIndex';
+import { recreateMaterializedPoints } from './model/ledger';
+import { createPerfTracker, PERF_BUDGETS } from './model/perf';
+import {
+  registerHeatmap, updateHeatmap, setHeatmapVisible, buildHeatFeatures, type HeatView,
+} from './overlay/heatmap';
+import { haversine } from './model/geo';
 
 const TAG = '[InducedDemand]';
 const DEBUG = true; // verbose per-day heartbeat while verifying; set false to quiet
@@ -116,6 +130,17 @@ if (!api) {
       /** Road-graph load attempts for this city, capped by MAX_ROAD_LOAD_ATTEMPTS. */
       attempts: number;
     };
+    /** Access-field state, per city (spec §1/§8). */
+    field?: {
+      city: string;
+      sites: Site[];
+      graph: StationGraph;
+      opps: StationOpportunity[];
+      fit: DensityFit;
+      hash: string;
+      water: WaterIndex | null;
+      waterFailed: boolean;
+    };
   }
   const w = window as unknown as Record<string, number | boolean | undefined>;
   const wSession = window as unknown as Record<string, PersistentSession | undefined>;
@@ -136,6 +161,29 @@ if (!api) {
   const store: KVStore | null = (() => {
     try { return window.localStorage; } catch { return null; }
   })();
+
+  const perf = createPerfTracker(
+    (m) => { if (DEBUG) console.log(m); },
+    (m) => console.warn(m),
+  );
+
+  /** Water index, one load attempt per city; null = no mask (warned once). */
+  async function loadWaterIndex(city: string): Promise<WaterIndex | null> {
+    const start = performance.now();
+    try {
+      const file = await loadCityJson<OceanDepthFile>(
+        window as unknown as DataServerHost, `/data/${city}/ocean_depth_index.json`,
+      );
+      const idx = buildWaterIndex(file);
+      const ms = performance.now() - start;
+      if (DEBUG) console.log(`[InducedDemand][perf] water ${ms.toFixed(0)}ms (${file.depths.length} polys)`);
+      if (ms > PERF_BUDGETS.water) console.warn(`${TAG} water index load over budget: ${ms.toFixed(0)}ms`);
+      return idx;
+    } catch (e) {
+      console.warn(`${TAG} no ocean_depth_index for ${city} — placing without a water mask`, e);
+      return null;
+    }
+  }
   const LEDGER_KEY = (city: string): string => `induceddemand:ledger:${city}`;
   // Fitted road speeds: derived from the city's data, so they only change when the
   // city data does. Cached to skip ~4 s of routing on every later load.
@@ -226,6 +274,104 @@ if (!api) {
   /** Live routes only — in-progress (temp-parent) routes do not induce demand. */
   function inductionStations(): Station[] {
     return api.gameState.getStations({ includeTempRoutes: false });
+  }
+
+  /** Live routes incl. stations, for graph + hash. */
+  function liveRoutes() {
+    return api.gameState.getRoutes({ includeTempRoutes: false });
+  }
+
+  /**
+   * Tier 1 — full structural rebuild (spec §8): graph, opportunities, density
+   * fit, candidate sampling, heatmap. Runs at init, debounced on route
+   * created/deleted, and when the day-end structural hash mismatches.
+   */
+  async function rebuildField(): Promise<void> {
+    const city = key();
+    if (city === 'unknown') return;
+    const dd = api.gameState.getDemandData();
+    if (!dd) return;
+    const session = ensureSession();
+    let water = session.field?.city === city ? session.field.water : null;
+    let waterFailed = session.field?.city === city ? session.field.waterFailed : false;
+    if (!water && !waterFailed) {
+      water = await loadWaterIndex(city);
+      waterFailed = water === null;
+    }
+    perf.track('tier1', PERF_BUDGETS.tier1, () => {
+      const routes = liveRoutes();
+      const stations = inductionStations();
+      const groups = api.gameState.getStationGroups?.() ?? [];
+      const graph = buildStationGraph(routes, stations, groups, DEFAULT_CONFIG);
+      const opps = computeOpportunities(graph, stationMasses(stations, dd.points.values(), DEFAULT_CONFIG), DEFAULT_CONFIG);
+      const acc = (c: Coordinate) => accessAt(c, opps, DEFAULT_CONFIG);
+      const fitInput: FitInputPoint[] = [...dd.points.values()].map((p) => {
+        const a = acc(p.location);
+        return { location: p.location, residents: p.residents, jobs: p.jobs, access: Math.max(a.res, a.com) };
+      });
+      const fit = fitDensity(fitInput, DEFAULT_CONFIG);
+      const isWater = (c: Coordinate): boolean => water?.isWater(c) ?? false;
+      const sites = buildSites({
+        dd,
+        stations,
+        materialized: ledger.materialized ?? {},
+        catchmentM: DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED,
+        deps: {
+          spacingAt: (c) => spacingAt(fit, Math.max(acc(c).res, acc(c).com)),
+          accessAt: acc,
+          isWater,
+        },
+        seedPrefix: city,
+        cfg: DEFAULT_CONFIG,
+      });
+      session.field = {
+        city, sites, graph, opps, fit, hash: computeStructuralHash(routes), water, waterFailed,
+      };
+      return sites;
+    }, (sites) => `${sites.length} sites`);
+    refreshHeatmap();
+  }
+
+  /**
+   * Tier 2 — day-end weight refresh (spec §8): re-derive schedule weights +
+   * opportunities from getRoutes() (never getTrains()), refresh cached site
+   * access. Promotes to Tier 1 when the structural hash changed (route edits
+   * fire NO hook — this is the primary edit detector).
+   */
+  async function refreshFieldWeights(): Promise<void> {
+    const session = ensureSession();
+    const f = session.field;
+    const city = key();
+    const dd = api.gameState.getDemandData();
+    if (!f || f.city !== city || !dd) { await rebuildField(); return; }
+    const routes = liveRoutes();
+    if (computeStructuralHash(routes) !== f.hash) { await rebuildField(); return; }
+    perf.track('tier2', PERF_BUDGETS.tier2, () => {
+      const stations = inductionStations();
+      const groups = api.gameState.getStationGroups?.() ?? [];
+      f.graph = buildStationGraph(routes, stations, groups, DEFAULT_CONFIG);
+      f.opps = computeOpportunities(f.graph, stationMasses(stations, dd.points.values(), DEFAULT_CONFIG), DEFAULT_CONFIG);
+      refreshSiteAccess(f.sites, (c) => accessAt(c, f.opps, DEFAULT_CONFIG));
+    });
+  }
+
+  /** Debounced Tier 1 for route hooks (bursts on batch edits). */
+  let fieldRebuildTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleFieldRebuild(): void {
+    if (fieldRebuildTimer) clearTimeout(fieldRebuildTimer);
+    fieldRebuildTimer = setTimeout(() => {
+      fieldRebuildTimer = null;
+      if (isCurrent()) void rebuildField();
+    }, 500);
+  }
+
+  function refreshHeatmap(): void {
+    const s = overlayStore.get();
+    const view = (s.heatView ?? 'off') as HeatView;
+    const f = wSession[SESSION_KEY]?.field;
+    if (view === 'off' || !f || f.city !== key()) { setHeatmapVisible(api, false); return; }
+    updateHeatmap(api, buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG));
+    setHeatmapVisible(api, true);
   }
 
   /**
@@ -468,11 +614,19 @@ if (!api) {
     if (!s.enabled) { setOverlayVisible(api, false); return; }
     const dd = api.gameState.getDemandData();
     if (!dd) return;
-    // TEMPORARY bridge (Task 10): zero access ⇒ empty targeting view. Task 12 wires the real field.
-    const fc = buildOverlay(dd, () => ({ res: 0, com: 0 }), s.view, s.metric, DEFAULT_CONFIG);
+    const fieldForOverlay = wSession[SESSION_KEY]?.field;
+    const fc = buildOverlay(
+      dd,
+      (p) => {
+        if (!fieldForOverlay || fieldForOverlay.city !== key()) return { res: 0, com: 0 };
+        return accessAt(p.location, fieldForOverlay.opps, DEFAULT_CONFIG);
+      },
+      s.view, s.metric, DEFAULT_CONFIG,
+    );
     lastMax = fc.maxValue;
     updateOverlay(api, fc);
     setOverlayVisible(api, true);
+    refreshHeatmap();
   }
   overlayStore.subscribe(refreshOverlay);
 
@@ -506,12 +660,14 @@ if (!api) {
       () => lastMax,
       () => persistentUi.resetInducedDemand?.(),
       createHistoryPanel(api, overlayStore, historyDays),
+      () => perf.summary(),
     );
   }
 
   function registerToolbarPanel(): void {
     refreshPanelRender();
     registerOverlay(api);
+    registerHeatmap(api);
     const React = api.utils.React as { createElement: (type: unknown) => unknown };
     api.ui.addToolbarPanel({
       id: TOOLBAR_PANEL_ID,
@@ -632,6 +788,12 @@ if (!api) {
   // Runs once per load, as soon as demand data is available.
   function ensureReconcile(dd: DemandData): void {
     if (didReconcile) return;
+    // Materialized points FIRST: the load dropped them (city-file-authoritative
+    // merge), and roster pops may reference induced-pt:* endpoints.
+    const mat = recreateMaterializedPoints(dd, ledger);
+    if (mat.recreated || mat.dropped) {
+      console.log(`${TAG} materialized points: recreated ${mat.recreated}, GC'd ${mat.dropped}`);
+    }
     reconcileBaselines(dd, ledger);
     applyPendingAccum(ledger); // restore persisted growth pressure now that baselines exist
     bumpSeq(dd);
@@ -725,6 +887,7 @@ if (!api) {
       ensureReconcile(dd);
       captureBaselines(dd, ledger);
       ready = true;
+      void rebuildField();
       refreshOverlay();
       syncPanelState();
       const pts = dd.points.size;
@@ -811,7 +974,10 @@ if (!api) {
     }
   });
 
-  api.hooks.onDayChange((day) => {
+  api.hooks.onRouteCreated(() => { if (isCurrent()) scheduleFieldRebuild(); });
+  api.hooks.onRouteDeleted(() => { if (isCurrent()) scheduleFieldRebuild(); });
+
+  api.hooks.onDayChange(async (day) => {
     if (!isCurrent()) return;
     if (!ready) return;
     // Keep the load marker's game-clock high-water mark current: a later save
@@ -828,22 +994,43 @@ if (!api) {
     } catch (e) {
       console.error(`${TAG} reconcile failed`, e);
     }
-    let result: DayResult = { added: 0, removed: 0, newPoints: 0, deltas: {} };
+    // Tier 2 (or hash-promoted Tier 1) BEFORE growth — no growth day on stale weights.
     try {
-      // TEMPORARY bridge (Task 10): behavior-neutral placeholders — zero-access sites and
-      // zero fit deps produce NO growth. Task 12 replaces this with the real site field.
-      result = runDay(
-        dd,
-        [...dd.points.values()].map((p) => ({
-          id: p.id, pointId: p.id, location: p.location, accessRes: 0, accessCom: 0,
-        })),
-        ledger, DEFAULT_CONFIG,
-        makeRng(hashSeed(currentCity(), day)),
-        { massAt: () => 0, spacingAt: () => DEFAULT_CONFIG.R_MAX, jitter: (_i, n) => n },
-        liveSlotSet(), drivingModel(),
-      );
+      await refreshFieldWeights();
     } catch (e) {
-      console.error(`${TAG} runDay failed on day ${day}`, e);
+      console.error(`${TAG} field refresh failed`, e);
+    }
+    const field = wSession[SESSION_KEY]?.field;
+    let result: DayResult = { added: 0, removed: 0, newPoints: 0, deltas: {} };
+    if (field && field.city === key()) {
+      const jitterDep = (pid: string, nominal: Coordinate, rM: number): Coordinate =>
+        jitterPosition(pid, nominal, rM, DEFAULT_CONFIG.J_FRAC, (c) => {
+          if (field.water?.isWater(c)) return true;
+          // Soft spacing vs every existing point (few k points × ≤ ~17 checks/day).
+          // Access (→ spacing) computed ONCE per candidate position, not per point.
+          const a = accessAt(c, field.opps, DEFAULT_CONFIG);
+          const softR = (1 - DEFAULT_CONFIG.J_FRAC) * spacingAt(field.fit, Math.max(a.res, a.com));
+          for (const p of dd.points.values()) {
+            if (haversine(c, p.location) < softR) return true;
+          }
+          return false;
+        });
+      try {
+        result = perf.track('day', PERF_BUDGETS.day, () => runDay(
+          dd, field.sites, ledger, DEFAULT_CONFIG,
+          makeRng(hashSeed(currentCity(), day)),
+          {
+            massAt: (a) => massAt(field.fit, a),
+            spacingAt: (a) => spacingAt(field.fit, a),
+            jitter: jitterDep,
+          },
+          liveSlotSet(), drivingModel(),
+        ), (r) => `+${r.added}/-${r.removed}/${r.newPoints}pt`);
+      } catch (e) {
+        console.error(`${TAG} runDay failed on day ${day}`, e);
+      }
+    } else if (DEBUG) {
+      console.log(`${TAG} day ${day}: field not ready — growth skipped this day`);
     }
     recordDayHistory(day, result);
     if (DEBUG) {
@@ -860,17 +1047,18 @@ if (!api) {
       }
       console.log(
         `${TAG} day ${day}: ${dd.points.size} pts, ${stations.length} stations, ${active} active, ` +
-        `induced ${induced} (+${result.added} -${result.removed}), ` +
+        `induced ${induced} (+${result.added} -${result.removed}), newPts ${result.newPoints}, ` +
         `Rp ${rp.toFixed(0)} Jp ${jp.toFixed(0)}, maxPressure ${maxPressure.toFixed(1)}/${DEFAULT_CONFIG.POP_SIZE}`,
       );
     } else if (result.added || result.removed) {
       console.log(`${TAG} day ${day}: +${result.added} -${result.removed} pops`);
     }
     if (overlayStore.get().enabled) refreshOverlay();
-    if (result.added > 0 || result.removed > 0) refreshNativeDemandDots();
+    if (result.added > 0 || result.removed > 0 || result.newPoints > 0) refreshNativeDemandDots();
     syncPanelState();
+    refreshHeatmap();
     persistSession();
-    if (result.removed > 0) persistLedgerToStore();
+    if (result.removed > 0 || result.newPoints > 0) persistLedgerToStore();
   });
 
   api.hooks.onGameSaved(() => {

@@ -210,6 +210,31 @@ function firstSymbolLayerId(map: MapLike): string | undefined {
   }
 }
 
+interface ErredMap {
+  on?: (type: string, cb: (e: { error?: { name?: string; message?: string } }) => void) => void;
+  __inducedHeatErrGuard?: boolean;
+}
+
+/**
+ * MapLibre's ImageSource fires a map `error` event when updateImage aborts the
+ * previous in-flight load (which happens on EVERY update — each new image
+ * cancels its predecessor's async decode). With no `error` listener MapLibre
+ * console.errors it, so the field spammed AbortErrors on every view change.
+ * Register one listener that drops those aborts and re-logs everything else,
+ * matching MapLibre's own default logging for genuine errors. Idempotent per map
+ * (the map is recreated on save reload; we re-arm on the next update).
+ */
+function installMapErrorGuard(map: unknown): void {
+  const m = map as ErredMap;
+  if (!m.on || m.__inducedHeatErrGuard) return;
+  m.__inducedHeatErrGuard = true;
+  m.on('error', (ev) => {
+    const err = ev?.error;
+    if (err && (err.name === 'AbortError' || /abort/i.test(err.message ?? ''))) return;
+    console.error(err ?? ev); // preserve MapLibre's default visibility for real errors
+  });
+}
+
 /** Register hook (called on map ready). The image source is added lazily on first update. */
 export function registerHeatmap(_api: ModdingAPI): void {
   // No-op: an `image` source needs its data + geographic coordinates, which only
@@ -218,8 +243,10 @@ export function registerHeatmap(_api: ModdingAPI): void {
 }
 
 export function updateHeatmap(api: ModdingAPI, fc: HeatFeatureCollection): void {
-  const map = api.utils.getMap() as unknown as MapLike | null;
-  if (!map) return;
+  const rawMap = api.utils.getMap();
+  if (!rawMap) return;
+  installMapErrorGuard(rawMap);
+  const map = rawMap as unknown as MapLike;
   const raster = rasterizeField(fc.features);
   const canvas = document.createElement('canvas');
   canvas.width = raster.width;

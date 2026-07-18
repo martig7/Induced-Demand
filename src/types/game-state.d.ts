@@ -147,6 +147,18 @@ export interface TrainSchedule {
   highDemand: number;
   mediumDemand: number;
   lowDemand: number;
+  /** @verified optional in the v1.4.10 bundle (`veryLowDemand ?? lowDemand`). */
+  veryLowDemand?: number;
+}
+
+/**
+ * Timetable scheduling mode. @verified against the build: routes with
+ * `mode === 'timetable'` are costed via `periods[].headwaySeconds`
+ * (`getMaxTimetableTrains` in the bundle); other fields exist but are unused here.
+ */
+export interface TimetableSchedule {
+  mode: string;
+  periods: { headwaySeconds: number }[];
 }
 
 export interface Route {
@@ -160,6 +172,8 @@ export interface Route {
   idealTrainCount?: number;
   trainType?: string;
   trainSchedule?: TrainSchedule;
+  /** @verified Present on timetable-mode routes; see {@link TimetableSchedule}. */
+  timetableSchedule?: TimetableSchedule;
   tempParentId?: string | null;
   stations?: Station[];
   stNodes?: StNode[];

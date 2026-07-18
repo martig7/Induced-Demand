@@ -8,3 +8,13 @@ export const INDUCED_PREFIX = 'induced:';
 export function isInduced(popId: string): boolean {
   return popId.startsWith(INDUCED_PREFIX);
 }
+
+/**
+ * Demand POINTS this mod materializes from candidate sites. Distinct prefix from
+ * pops: `isInduced` (pop checks) must NOT match point ids and vice versa.
+ */
+export const INDUCED_POINT_PREFIX = 'induced-pt:';
+
+export function isInducedPoint(pointId: string): boolean {
+  return pointId.startsWith(INDUCED_POINT_PREFIX);
+}

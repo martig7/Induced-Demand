@@ -56,6 +56,20 @@ test('site ids are stable and prefixed by seedKey', () => {
   assert.match(sites[1].id, /^TST:station1:1$/);
 });
 
+test('rejection honors the larger of both samples’ spacing radii', () => {
+  // West half (lon < 0) wants wide spacing, east half (lon >= 0) wants dense.
+  const spacingAt = (c: [number, number]) => (c[0] < 0 ? 600 : 150);
+  const sites = sampleCatchmentSites(opts({ spacingAt }));
+  assert.ok(sites.length > 10, `got ${sites.length}`);
+  for (let i = 0; i < sites.length; i++) {
+    for (let j = i + 1; j < sites.length; j++) {
+      const d = haversine(sites[i].location, sites[j].location);
+      const rMax = Math.max(spacingAt(sites[i].location), spacingAt(sites[j].location));
+      assert.ok(d >= 0.65 * rMax - 1, `pair ${i},${j} at ${d}m (need ${0.65 * rMax})`);
+    }
+  }
+});
+
 test('jitterPosition: within J·r, deterministic, re-rolls on rejection', () => {
   const nominal: [number, number] = [0, 0];
   const a = jitterPosition('induced-pt:7', nominal, R, 0.35, () => false);

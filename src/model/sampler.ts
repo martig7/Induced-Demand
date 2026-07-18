@@ -57,17 +57,22 @@ export function sampleCatchmentSites(opts: SampleCatchmentOpts): SamplePoint[] {
   const rng = makeRng(hashStringToSeed(opts.seedKey));
 
   // Occupancy grid over accepted + prior positions (meter frame), cell = R_MIN-ish.
-  const accepted: { x: number; y: number; loc: Coordinate }[] = [];
-  const blockers: { x: number; y: number }[] = [];
+  // Each sample/blocker carries its OWN spacing radius so rejection honors the
+  // larger exclusion disk of the two — a dense candidate must not encroach on a
+  // sparse sample's wider disk, and vice versa.
+  const accepted: { x: number; y: number; loc: Coordinate; r: number }[] = [];
+  const blockers: { x: number; y: number; r: number }[] = [];
   for (const p of opts.priors) {
     const x = (p[0] - center[0]) * mPerLon;
     const y = (p[1] - center[1]) * mPerLat;
-    if (Math.hypot(x, y) <= radiusM + 2 * opts.spacingAt(p)) blockers.push({ x, y });
+    const r = opts.spacingAt(p);
+    if (Math.hypot(x, y) <= radiusM + 2 * r) blockers.push({ x, y, r });
   }
-  const tooClose = (x: number, y: number, r: number): boolean => {
-    const minD = softFactor * r;
-    for (const b of blockers) if (Math.hypot(b.x - x, b.y - y) < minD) return true;
-    for (const a of accepted) if (Math.hypot(a.x - x, a.y - y) < minD) return true;
+  const tooClose = (x: number, y: number, rNew: number): boolean => {
+    for (const b of blockers)
+      if (Math.hypot(b.x - x, b.y - y) < softFactor * Math.max(rNew, b.r)) return true;
+    for (const a of accepted)
+      if (Math.hypot(a.x - x, a.y - y) < softFactor * Math.max(rNew, a.r)) return true;
     return false;
   };
 
@@ -77,7 +82,7 @@ export function sampleCatchmentSites(opts: SampleCatchmentOpts): SamplePoint[] {
     const r = opts.spacingAt(loc);
     if (tooClose(x, y, r)) return false;
     if (opts.reject(loc)) return false;
-    accepted.push({ x, y, loc });
+    accepted.push({ x, y, loc, r });
     return true;
   };
 

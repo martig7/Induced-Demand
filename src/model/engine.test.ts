@@ -27,14 +27,10 @@ function world(): DemandData {
 function siteOf(p: DemandPoint, access = 0.8): Site {
   return { id: p.id, pointId: p.id, location: p.location, accessRes: access, accessCom: access };
 }
-/** Empty candidate site. */
-function candidate(id: string, lon: number, lat: number, access = 0.8): Site {
-  return { id, pointId: null, location: [lon, lat], accessRes: access, accessCom: access };
-}
 const DAY_DEPS: RunDayDeps = {
   massAt: () => 2000,
-  spacingAt: () => 300,
-  jitter: (_id, nominal) => nominal,
+  cells: null,
+  findCut: () => null,
 };
 
 /** Served sites for H/W (access 0.8), Z unserved (access 0) — mirrors the old single-station fixture. */
@@ -203,48 +199,64 @@ test('runDay deltas contain only touched points', () => {
   assert.deepEqual(r.deltas, {});
 });
 
-// --- Condensation of empty sites into materialized demand points (spec §5) ---
+// --- Voronoi subdivision: the split step (spec 2026-07-18) -------------------
 
-test('condensation: an empty site that wins allocation materializes a point + pop', () => {
+test('split: pressure accrues ∝ deficit × fill and splits at threshold', () => {
   const dd = makeDD([point('n1', 0, 0, 1000, 1000)]);
   const ledger = newLedger();
-  ledger.sites = { 'c1': [DEFAULT_CONFIG.POP_SIZE, DEFAULT_CONFIG.POP_SIZE] }; // pre-pressurized
-  const sites = [siteOf(dd.points.get('n1')!, 0.8), candidate('c1', 0.01, 0.01)];
-  const r = runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), DAY_DEPS);
-  assert.ok(r.newPoints >= 1, `materialized ${r.newPoints}`);
+  const sites = [siteOf(dd.points.get('n1')!, 0.8)];
+  // Huge supported mass + full anchor → one day crosses a small threshold.
+  const cfgFast = { ...DEFAULT_CONFIG, SPLIT_THRESHOLD: 1000, SPLIT_RATE: 1 };
+  const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
+  const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
+    massAt: () => 2000, cells, findCut: (_id, c) => c,
+  });
+  assert.equal(r.newPoints, 1);
   const pid = 'induced-pt:0';
-  const p = dd.points.get(pid);
-  assert.ok(p, 'point exists');
-  assert.ok(ledger.materialized?.[pid], 'ledger records it');
-  assert.equal(ledger.sites?.['c1'], undefined, 'site accum transferred');
-  assert.ok(ledger.points[pid], 'point accumulator exists with baseline 0');
+  assert.ok(dd.points.get(pid), 'point materialized at the cut');
+  assert.deepEqual(dd.points.get(pid)!.location, [0.01, 0]);
+  assert.ok(ledger.materialized?.[pid]);
   assert.equal(ledger.points[pid].baselineResidents, 0);
-  // the pop that won it references live endpoints
-  const popIds = [...dd.popsMap.keys()].filter((id) => id.startsWith('induced:'));
-  assert.ok(popIds.length >= 1);
 });
 
-test('empty sites accumulate pressure from access alone', () => {
-  const dd = makeDD([]);
+test('split: empty anchor (fill 0) never splits regardless of deficit', () => {
+  const dd = makeDD([point('n1', 0, 0, 0, 0)]);
+  dd.points.get('n1')!.residents = 0;
+  dd.points.get('n1')!.jobs = 0;
   const ledger = newLedger();
-  const sites = [candidate('c1', 0, 0, 0.8)];
-  runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), DAY_DEPS);
-  assert.ok((ledger.sites?.['c1']?.[0] ?? 0) > 0, 'res pressure accrued');
+  const sites = [siteOf(dd.points.get('n1')!, 0.8)];
+  const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
+  runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), {
+    massAt: () => 2000, cells, findCut: (_id, c) => c,
+  });
+  assert.equal(ledger.cells?.n1 ?? 0, 0);
 });
 
-test('empty sites never decay below zero pressure', () => {
-  const dd = makeDD([]);
+test('split: budget caps splits per day, highest pressure first', () => {
+  const pts = [point('a', 0, 0, 1000, 1000), point('b', 0.1, 0, 1000, 1000),
+    point('c', 0.2, 0, 1000, 1000), point('d', 0.3, 0, 1000, 1000)];
+  const dd = makeDD(pts);
   const ledger = newLedger();
-  ledger.sites = { c1: [0, 0] };
-  const sites = [candidate('c1', 0, 0, 0)]; // zero access
-  runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), DAY_DEPS);
-  assert.deepEqual(ledger.sites.c1, [0, 0]);
+  ledger.cells = { a: 999, b: 999, c: 999, d: 999 };
+  const sites = pts.map((p) => siteOf(dd.points.get(p.id)!, 0.8));
+  const cfgFast = { ...DEFAULT_CONFIG, SPLIT_THRESHOLD: 1000, MAX_SPLITS_PER_DAY: 2 };
+  const cells = new Map(pts.map((p) => [p.id,
+    { supportedMass: 1e6, centroid: [p.location[0] + 0.01, 0] as [number, number] }]));
+  const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
+    massAt: () => 2000, cells, findCut: (_id, c) => c,
+  });
+  assert.equal(r.newPoints, 2);
 });
 
-test('densify creeps only when saturated', () => {
-  const dd = makeDD([point('n1', 0, 0, 100, 100)]);
+test('split: findCut null leaves pressure capped, no point', () => {
+  const dd = makeDD([point('n1', 0, 0, 1000, 1000)]);
   const ledger = newLedger();
-  const sites = [siteOf(dd.points.get('n1')!, 0.1)];
-  runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), DAY_DEPS);
-  assert.equal(ledger.densify, 1); // far from saturation
+  const sites = [siteOf(dd.points.get('n1')!, 0.8)];
+  const cfgFast = { ...DEFAULT_CONFIG, SPLIT_THRESHOLD: 1000 };
+  const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
+  const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
+    massAt: () => 2000, cells, findCut: () => null,
+  });
+  assert.equal(r.newPoints, 0);
+  assert.equal(ledger.cells?.n1, 1000); // capped at threshold, retries later
 });

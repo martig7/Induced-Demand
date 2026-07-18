@@ -45,7 +45,6 @@ import {
   type StationOpportunity, type AccessIndex,
 } from './model/opportunity';
 import { fitDensity, spacingAt, massAt, type DensityFit, type FitInputPoint } from './model/densityFit';
-import { jitterPosition } from './model/sampler';
 import {
   createSiteBuilder, refreshSiteAccess, computeStructuralHash, computeServiceHash,
   type Site, type BuildSitesOpts,
@@ -56,7 +55,6 @@ import { createPerfTracker, PERF_BUDGETS } from './model/perf';
 import {
   registerHeatmap, updateHeatmap, setHeatmapVisible, buildHeatFeatures, type HeatView,
 } from './overlay/heatmap';
-import { haversine } from './model/geo';
 
 const TAG = '[InducedDemand]';
 const DEBUG = true; // verbose per-day heartbeat while verifying; set false to quiet
@@ -1170,26 +1168,14 @@ if (!api) {
     const field = wSession[SESSION_KEY]?.field;
     let result: DayResult = { added: 0, removed: 0, newPoints: 0, deltas: {} };
     if (field && field.city === key()) {
-      const jitterDep = (pid: string, nominal: Coordinate, rM: number): Coordinate =>
-        jitterPosition(pid, nominal, rM, DEFAULT_CONFIG.J_FRAC, (c) => {
-          if (field.water?.isWater(c)) return true;
-          // Soft spacing vs every existing point (few k points × ≤ ~17 checks/day).
-          // Access (→ spacing) computed ONCE per candidate position, not per point.
-          const a = field.accessIdx.at(c);
-          const softR = (1 - DEFAULT_CONFIG.J_FRAC) * spacingAt(field.fit, Math.max(a.res, a.com));
-          for (const p of dd.points.values()) {
-            if (haversine(c, p.location) < softR) return true;
-          }
-          return false;
-        });
       try {
         result = perf.track('day', PERF_BUDGETS.day, () => runDay(
           dd, field.sites, ledger, DEFAULT_CONFIG,
           makeRng(hashSeed(currentCity(), day)),
           {
             massAt: (a) => massAt(field.fit, a),
-            spacingAt: (a) => spacingAt(field.fit, a),
-            jitter: jitterDep,
+            cells: null,      // TEMPORARY (Task 4): lattice wired in Task 6
+            findCut: () => null,
           },
           liveSlotSet(), drivingModel(),
         ), (r) => `+${r.added}/-${r.removed}/${r.newPoints}pt`);

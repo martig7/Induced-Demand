@@ -1,0 +1,73 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { haversine } from './geo';
+import { hashStringToSeed, sampleCatchmentSites, jitterPosition } from './sampler';
+
+const R = 300; // constant spacing for tests
+const opts = (over: Partial<Parameters<typeof sampleCatchmentSites>[0]> = {}) => ({
+  seedKey: 'TST:station1',
+  center: [0, 0] as [number, number],
+  radiusM: 1500,
+  priors: [] as [number, number][],
+  spacingAt: () => R,
+  reject: () => false,
+  softFactor: 0.65,
+  ...over,
+});
+
+test('deterministic: same seedKey → identical sites; different key → different', () => {
+  const a = sampleCatchmentSites(opts());
+  const b = sampleCatchmentSites(opts());
+  assert.deepEqual(a, b);
+  const c = sampleCatchmentSites(opts({ seedKey: 'TST:station2' }));
+  assert.notDeepEqual(a.map((s) => s.location), c.map((s) => s.location));
+});
+
+test('fills the disc and respects soft spacing between samples', () => {
+  const sites = sampleCatchmentSites(opts());
+  assert.ok(sites.length > 10, `got ${sites.length}`);
+  for (let i = 0; i < sites.length; i++) {
+    assert.ok(haversine([0, 0], sites[i].location) <= 1500 + 1);
+    for (let j = i + 1; j < sites.length; j++) {
+      const d = haversine(sites[i].location, sites[j].location);
+      assert.ok(d >= 0.65 * R - 1, `pair ${i},${j} at ${d}m`);
+    }
+  }
+});
+
+test('priors block their soft-spacing neighborhood', () => {
+  const priors: [number, number][] = [[0, 0]];
+  const sites = sampleCatchmentSites(opts({ priors }));
+  for (const s of sites) {
+    assert.ok(haversine([0, 0], s.location) >= 0.65 * R - 1);
+  }
+});
+
+test('reject predicate (water) excludes sites', () => {
+  // reject everything west of the center
+  const sites = sampleCatchmentSites(opts({ reject: (c) => c[0] < 0 }));
+  assert.ok(sites.length > 0);
+  for (const s of sites) assert.ok(s.location[0] >= 0);
+});
+
+test('site ids are stable and prefixed by seedKey', () => {
+  const sites = sampleCatchmentSites(opts());
+  assert.match(sites[0].id, /^TST:station1:0$/);
+  assert.match(sites[1].id, /^TST:station1:1$/);
+});
+
+test('jitterPosition: within J·r, deterministic, re-rolls on rejection', () => {
+  const nominal: [number, number] = [0, 0];
+  const a = jitterPosition('induced-pt:7', nominal, R, 0.35, () => false);
+  const b = jitterPosition('induced-pt:7', nominal, R, 0.35, () => false);
+  assert.deepEqual(a, b);
+  assert.ok(haversine(nominal, a) <= 0.35 * R + 1);
+  assert.ok(haversine(nominal, a) > 0); // actually moved
+  // rejecting every position falls back to the nominal
+  const fallback = jitterPosition('induced-pt:7', nominal, R, 0.35, () => true);
+  assert.deepEqual(fallback, nominal);
+  // rejecting only the first attempt yields a different (re-rolled) position
+  let calls = 0;
+  const rerolled = jitterPosition('induced-pt:7', nominal, R, 0.35, () => calls++ === 0);
+  assert.notDeepEqual(rerolled, a);
+});

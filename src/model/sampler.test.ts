@@ -1,19 +1,39 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { Coordinate } from '../types/core';
 import { haversine } from './geo';
-import { hashStringToSeed, sampleCatchmentSites, jitterPosition } from './sampler';
+import {
+  hashStringToSeed, sampleCatchmentSites, jitterPosition, createSpacingIndex,
+  type SpacingIndex,
+} from './sampler';
 
 const R = 300; // constant spacing for tests
 const opts = (over: Partial<Parameters<typeof sampleCatchmentSites>[0]> = {}) => ({
   seedKey: 'TST:station1',
   center: [0, 0] as [number, number],
   radiusM: 1500,
-  priors: [] as [number, number][],
+  blockers: createSpacingIndex(),
   spacingAt: () => R,
   reject: () => false,
   softFactor: 0.65,
   ...over,
 });
+
+/**
+ * Brute-force reference of the SpacingIndex predicate: same entries, same
+ * softFactor·max(rNew, rEntry) rule, but a linear scan. The grid must be a pure
+ * lookup optimization — any divergence is a bug in the cell-ring search.
+ */
+function bruteIndex(): SpacingIndex & { entries: { loc: Coordinate; r: number }[] } {
+  const entries: { loc: Coordinate; r: number }[] = [];
+  return {
+    entries,
+    insert: (loc, r) => { entries.push({ loc, r }); },
+    blocked: (loc, rNew, softFactor) =>
+      entries.some((e) => haversine(loc, e.loc) < softFactor * Math.max(rNew, e.r)),
+    size: () => entries.length,
+  };
+}
 
 test('deterministic: same seedKey → identical sites; different key → different', () => {
   const a = sampleCatchmentSites(opts());
@@ -21,6 +41,21 @@ test('deterministic: same seedKey → identical sites; different key → differe
   assert.deepEqual(a, b);
   const c = sampleCatchmentSites(opts({ seedKey: 'TST:station2' }));
   assert.notDeepEqual(a.map((s) => s.location), c.map((s) => s.location));
+});
+
+test('golden: grid index produces byte-identical output to the brute-force reference', () => {
+  // Varying spacing (wide west, dense east) + pre-seeded blockers stresses the
+  // maxR-driven ring search and the per-entry radius rule.
+  const spacingAt = (c: Coordinate) => (c[0] < 0 ? 600 : 150);
+  const blockerLocs: Coordinate[] = [[0.002, 0.001], [-0.004, -0.003], [0.008, 0.006]];
+  const run = (blockers: SpacingIndex) => {
+    for (const loc of blockerLocs) blockers.insert(loc, spacingAt(loc));
+    return sampleCatchmentSites(opts({ spacingAt, blockers }));
+  };
+  const viaGrid = run(createSpacingIndex());
+  const viaBrute = run(bruteIndex());
+  assert.deepEqual(viaGrid, viaBrute);
+  assert.ok(viaGrid.length > 10, `got ${viaGrid.length}`);
 });
 
 test('fills the disc and respects soft spacing between samples', () => {
@@ -35,11 +70,30 @@ test('fills the disc and respects soft spacing between samples', () => {
   }
 });
 
-test('priors block their soft-spacing neighborhood', () => {
-  const priors: [number, number][] = [[0, 0]];
-  const sites = sampleCatchmentSites(opts({ priors }));
+test('pre-seeded blockers exclude their soft-spacing neighborhood', () => {
+  const blockers = createSpacingIndex();
+  blockers.insert([0, 0], R);
+  const sites = sampleCatchmentSites(opts({ blockers }));
   for (const s of sites) {
     assert.ok(haversine([0, 0], s.location) >= 0.65 * R - 1);
+  }
+});
+
+test('the shared index carries spacing across catchments', () => {
+  // Two overlapping catchments sampled with ONE index: every cross-catchment
+  // pair must still respect soft spacing (this is what per-catchment priors
+  // used to approximate and the shared index now guarantees).
+  const blockers = createSpacingIndex();
+  const a = sampleCatchmentSites(opts({ blockers }));
+  const b = sampleCatchmentSites(opts({
+    blockers, seedKey: 'TST:station2', center: [0.01, 0] as [number, number],
+  }));
+  assert.ok(a.length > 0 && b.length > 0);
+  for (const sa of a) {
+    for (const sb of b) {
+      const d = haversine(sa.location, sb.location);
+      assert.ok(d >= 0.65 * R - 1, `cross pair at ${d}m`);
+    }
   }
 });
 

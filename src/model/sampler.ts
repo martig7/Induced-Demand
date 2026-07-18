@@ -2,9 +2,10 @@
  * Deterministic blue-noise site sampling (spec §4). Bridson Poisson-disc with a
  * spatially-varying radius inside one station catchment, seeded by city+station —
  * candidates re-derive identically every load, so positions are never persisted.
- * Priors (existing demand points / already-accepted sites) block placement at the
- * SOFT spacing (1−J_FRAC)·r so condensation jitter reads as organic scatter
- * instead of compounding displacement. Water (or any reject predicate) excludes.
+ * Blockers (existing demand points / already-accepted sites) live in one shared
+ * SpacingIndex per field build and block placement at the SOFT spacing
+ * (1−J_FRAC)·r, so condensation jitter reads as organic scatter instead of
+ * compounding displacement. Water (or any reject predicate) excludes.
  *
  * Jitter at condensation is seeded by the materialized POINT id (FNV-1a →
  * mulberry32, the commuteTimes pattern): deterministic re-roll ≤ 4 attempts
@@ -23,13 +24,79 @@ export function hashStringToSeed(s: string): number {
 
 export interface SamplePoint { id: string; location: Coordinate }
 
+/**
+ * Spatial hash over every placed site/blocker, shared across ALL catchments of
+ * one field build. Each entry carries its own spacing radius; a candidate is
+ * blocked when it sits within softFactor·max(rNew, rEntry) of any entry — the
+ * larger exclusion disk of the two wins. Cell-ring lookup makes the check
+ * O(nearby) instead of O(all placed), which is what turned the 10k-site build
+ * quadratic (161 s measured in-game before this index existed).
+ */
+export interface SpacingIndex {
+  insert(loc: Coordinate, r: number): void;
+  blocked(loc: Coordinate, rNew: number, softFactor: number): boolean;
+  size(): number;
+}
+
+const CELL_M = 128;
+
+export function createSpacingIndex(): SpacingIndex {
+  const cells = new Map<string, { loc: Coordinate; r: number }[]>();
+  // Longitude cell width is fixed from the FIRST insert's latitude (deterministic
+  // for a given build input order); the ring search adds a margin cell so the
+  // small within-city cos(lat) drift can never miss a neighbor.
+  let cellLonDeg: number | null = null;
+  const cellLatDeg = CELL_M / M_PER_DEG;
+  let maxR = 0;
+  let count = 0;
+  const keyOf = (loc: Coordinate): { cx: number; cy: number } => ({
+    cx: Math.floor(loc[0] / (cellLonDeg ?? cellLatDeg)),
+    cy: Math.floor(loc[1] / cellLatDeg),
+  });
+  return {
+    insert(loc: Coordinate, r: number): void {
+      if (cellLonDeg === null) {
+        const cos = Math.max(0.2, Math.cos((loc[1] * Math.PI) / 180));
+        cellLonDeg = CELL_M / (M_PER_DEG * cos);
+      }
+      const { cx, cy } = keyOf(loc);
+      const k = `${cx},${cy}`;
+      const bucket = cells.get(k);
+      if (bucket) bucket.push({ loc, r }); else cells.set(k, [{ loc, r }]);
+      if (r > maxR) maxR = r;
+      count++;
+    },
+    blocked(loc: Coordinate, rNew: number, softFactor: number): boolean {
+      if (count === 0) return false;
+      const reach = softFactor * Math.max(rNew, maxR);
+      const ring = Math.ceil(reach / CELL_M) + 1; // +1 margin for lon-scale drift
+      const { cx, cy } = keyOf(loc);
+      for (let dx = -ring; dx <= ring; dx++) {
+        for (let dy = -ring; dy <= ring; dy++) {
+          const bucket = cells.get(`${cx + dx},${cy + dy}`);
+          if (!bucket) continue;
+          for (const e of bucket) {
+            if (haversine(loc, e.loc) < softFactor * Math.max(rNew, e.r)) return true;
+          }
+        }
+      }
+      return false;
+    },
+    size: () => count,
+  };
+}
+
 export interface SampleCatchmentOpts {
   /** Deterministic identity, e.g. `<city>:<stationId>`; also the site-id prefix. */
   seedKey: string;
   center: Coordinate;
   radiusM: number;
-  /** Existing locations that block placement (soft spacing). */
-  priors: Coordinate[];
+  /**
+   * Shared spacing index (soft-spacing blockers). The caller seeds it with
+   * existing points/sites once per BUILD, not per catchment; every accepted
+   * sample is inserted so later catchments respect it.
+   */
+  blockers: SpacingIndex;
   /** Local target spacing r (m) at a location. */
   spacingAt(c: Coordinate): number;
   /** True to exclude a location (water). */
@@ -48,7 +115,7 @@ const DART_SEEDS = 12;
 const M_PER_DEG = (6371008.8 * Math.PI) / 180;
 
 export function sampleCatchmentSites(opts: SampleCatchmentOpts): SamplePoint[] {
-  const { center, radiusM, softFactor } = opts;
+  const { center, radiusM, softFactor, blockers } = opts;
   const lat0 = center[1];
   const mPerLon = M_PER_DEG * Math.cos((lat0 * Math.PI) / 180);
   const mPerLat = M_PER_DEG;
@@ -56,33 +123,16 @@ export function sampleCatchmentSites(opts: SampleCatchmentOpts): SamplePoint[] {
     [center[0] + x / mPerLon, center[1] + y / mPerLat];
   const rng = makeRng(hashStringToSeed(opts.seedKey));
 
-  // Occupancy grid over accepted + prior positions (meter frame), cell = R_MIN-ish.
-  // Each sample/blocker carries its OWN spacing radius so rejection honors the
-  // larger exclusion disk of the two — a dense candidate must not encroach on a
-  // sparse sample's wider disk, and vice versa.
-  const accepted: { x: number; y: number; loc: Coordinate; r: number }[] = [];
-  const blockers: { x: number; y: number; r: number }[] = [];
-  for (const p of opts.priors) {
-    const x = (p[0] - center[0]) * mPerLon;
-    const y = (p[1] - center[1]) * mPerLat;
-    const r = opts.spacingAt(p);
-    if (Math.hypot(x, y) <= radiusM + 2 * r) blockers.push({ x, y, r });
-  }
-  const tooClose = (x: number, y: number, rNew: number): boolean => {
-    for (const b of blockers)
-      if (Math.hypot(b.x - x, b.y - y) < softFactor * Math.max(rNew, b.r)) return true;
-    for (const a of accepted)
-      if (Math.hypot(a.x - x, a.y - y) < softFactor * Math.max(rNew, a.r)) return true;
-    return false;
-  };
+  const accepted: { x: number; y: number; loc: Coordinate }[] = [];
 
   const tryAccept = (x: number, y: number): boolean => {
     if (Math.hypot(x, y) > radiusM) return false;
     const loc = toLonLat(x, y);
     const r = opts.spacingAt(loc);
-    if (tooClose(x, y, r)) return false;
+    if (blockers.blocked(loc, r, softFactor)) return false;
     if (opts.reject(loc)) return false;
-    accepted.push({ x, y, loc, r });
+    blockers.insert(loc, r);
+    accepted.push({ x, y, loc });
     return true;
   };
 

@@ -10,7 +10,7 @@ import type { Coordinate } from '../types/core';
 import type { DemandData, Route, Station } from '../types/game-state';
 import type { InducedDemandConfig } from './config';
 import type { DirectionalAccess } from './opportunity';
-import { sampleCatchmentSites } from './sampler';
+import { sampleCatchmentSites, createSpacingIndex } from './sampler';
 import { DEFAULT_CONFIG } from './config';
 
 export interface Site {
@@ -50,12 +50,15 @@ export function buildSites(opts: BuildSitesOpts): Site[] {
     takenSiteIds.set(rec.siteId, pid);
   }
 
-  // Natives + materialized points: occupied sites. Materialized keep their
-  // nominal site id so re-sampling dedupe knows the slot is taken.
+  // Natives + materialized points: occupied sites, and blockers in the ONE
+  // spacing index shared by every catchment of this build (the per-station
+  // priors-array rebuild was the quadratic heart of the 161 s tier1 rebuild).
+  const blockers = createSpacingIndex();
   const materializedByPoint = opts.materialized;
   for (const p of dd.points.values()) {
     const rec = materializedByPoint[p.id];
     const a = deps.accessAt(p.location);
+    blockers.insert(p.location, deps.spacingAt(p.location));
     sites.push({
       id: rec ? rec.siteId : p.id,
       pointId: p.id,
@@ -65,25 +68,30 @@ export function buildSites(opts: BuildSitesOpts): Site[] {
     });
   }
 
-  // Candidates: per routed station, oldest first; priors = everything placed so far.
+  // Candidates: per routed station, oldest first; accepted samples join the
+  // shared index as they land, so later catchments respect them automatically.
+  // Low-access spots are rejected inside the sampler (they neither exist nor
+  // block), replacing the old post-filter.
   const routed = opts.stations
     .filter((s) => (s.routeIds?.length ?? 0) > 0)
     .sort((a, b) => a.createdAt - b.createdAt);
-  const priorLocs = (): Coordinate[] => sites.map((s) => s.location);
   for (const st of routed) {
     const samples = sampleCatchmentSites({
       seedKey: `${opts.seedPrefix}:${st.id}`,
       center: st.coords,
       radiusM: opts.catchmentM,
-      priors: priorLocs(),
+      blockers,
       spacingAt: deps.spacingAt,
-      reject: deps.isWater,
+      reject: (c) => {
+        if (deps.isWater(c)) return true;
+        const a = deps.accessAt(c);
+        return Math.max(a.res, a.com) < cfg.MIN_SITE_ACCESS;
+      },
       softFactor: 1 - cfg.J_FRAC,
     });
     for (const s of samples) {
       if (takenSiteIds.has(s.id)) continue; // materialized already occupies this slot
       const a = deps.accessAt(s.location);
-      if (Math.max(a.res, a.com) < cfg.MIN_SITE_ACCESS) continue;
       sites.push({ id: s.id, pointId: null, location: s.location, accessRes: a.res, accessCom: a.com });
     }
   }

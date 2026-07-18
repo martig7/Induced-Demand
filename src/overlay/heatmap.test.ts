@@ -50,3 +50,57 @@ test('empty field: no features, maxValue 0, no throw', () => {
   assert.equal(fc.features.length, 0);
   assert.equal(fc.maxValue, 0);
 });
+
+// --- rasterization -----------------------------------------------------------
+
+import { rampColor, rasterizeField, type HeatFeature } from './heatmap';
+
+const feat = (id: string, lon: number, lat: number, t: number): HeatFeature => ({
+  type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { id, t },
+});
+
+test('rampColor: endpoints and midpoint match the palette', () => {
+  assert.deepEqual(rampColor(0), [237, 248, 251]);   // RAMP_LOW #edf8fb
+  assert.deepEqual(rampColor(1), [129, 15, 124]);    // RAMP_HIGH #810f7c
+  assert.deepEqual(rampColor(0.5), [140, 150, 198]); // RAMP_MID #8c96c6
+  assert.deepEqual(rampColor(-5), rampColor(0));     // clamped
+  assert.deepEqual(rampColor(5), rampColor(1));
+});
+
+test('rasterizeField: empty → 1x1 transparent pixel', () => {
+  const r = rasterizeField([]);
+  assert.equal(r.width, 1);
+  assert.equal(r.height, 1);
+  assert.equal(r.data[3], 0); // alpha 0
+});
+
+test('rasterizeField: a single site is hot at its center and transparent far away', () => {
+  const r = rasterizeField([feat('a', -74, 40.7, 1)], { gridMax: 41, kernelMeters: 700 });
+  assert.ok(r.width >= 1 && r.height >= 1);
+  // bbox brackets the site (padded by the kernel).
+  assert.ok(r.bbox[0] < -74 && r.bbox[2] > -74 && r.bbox[1] < 40.7 && r.bbox[3] > 40.7);
+  // Locate the site's pixel and assert it is opaque with a hot (RAMP_HIGH-ish) color.
+  const [w, s, e, n] = r.bbox;
+  const cx = Math.floor(((-74 - w) / (e - w)) * r.width);
+  const cy = Math.floor(((n - 40.7) / (n - s)) * r.height);
+  const o = (cy * r.width + cx) * 4;
+  assert.ok(r.data[o + 3] > 200, `center alpha ${r.data[o + 3]}`);
+  assert.ok(r.data[o] < 180 && r.data[o + 2] > 80, 'center trends toward the hot ramp end');
+  // A corner well outside the kernel is fully transparent.
+  const corner = 3; // top-left pixel's alpha
+  assert.equal(r.data[corner], 0);
+});
+
+test('rasterizeField: max-combine, not sum — two coincident sites do not exceed t=1 color', () => {
+  const one = rasterizeField([feat('a', 0, 0, 0.6)], { gridMax: 21, kernelMeters: 700 });
+  const two = rasterizeField([feat('a', 0, 0, 0.6), feat('b', 0, 0, 0.6)], { gridMax: 21, kernelMeters: 700 });
+  // Same center pixel color: overlapping identical sites take the max (0.6), never sum to a hotter value.
+  const center = (r: typeof one) => {
+    const [w, s, e, n] = r.bbox;
+    const cx = Math.floor(((0 - w) / (e - w)) * r.width);
+    const cy = Math.floor(((n - 0) / (n - s)) * r.height);
+    const o = (cy * r.width + cx) * 4;
+    return [r.data[o], r.data[o + 1], r.data[o + 2]];
+  };
+  assert.deepEqual(center(two), center(one));
+});

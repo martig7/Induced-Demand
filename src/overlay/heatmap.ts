@@ -2,15 +2,17 @@
  * Field heat view (spec §7): the targeting display IS the model's input. Views:
  * residential access, commercial access, growth pressure.
  *
- * NOT a MapLibre `heatmap` layer, and deliberately free of every zoom/density
- * coupling that made the field unreadable:
+ * NOT a MapLibre `heatmap` layer:
  *  - Color encodes each site's value on an ABSOLUTE scale (access is already in
  *    [0,1]; pressure is accum/POP_SIZE clamped to 1), NOT normalized to the
  *    citywide max — so a given color always means the same value, comparable
  *    across time and across cities.
- *  - Circles are a CONSTANT pixel size (no zoom scaling) and fully opaque with
- *    no blur, so overlapping marks never stack their translucency into a hotter
- *    color. Color depends only on `t`; zoom and neighbor density change nothing.
+ *  - Circles keep a CONSTANT GROUND footprint: the pixel radius doubles per zoom
+ *    level (inverse to meters-per-pixel), so a circle covers the same real-world
+ *    area at every zoom — its size stops "meaning" different things as you zoom.
+ *  - Circles are translucent, so where sites are dense their marks overlap and
+ *    the color deepens — that density read is intentional. Base color is still
+ *    the per-site absolute value; overlap layers density on top of it.
  */
 import type { ModdingAPI } from '../types/api';
 import type { InducedDemandConfig } from '../model/config';
@@ -76,13 +78,21 @@ export function buildHeatFeatures(
   return { type: 'FeatureCollection', features, maxValue };
 }
 
-/**
- * Constant PIXEL radius: circles do not resize with zoom, so their overlap (and
- * any color stacking it could cause) never changes as you zoom. Fully opaque +
- * no blur means overlapping marks occlude rather than blend — color is exactly
- * the site's value, never a hotter mix.
- */
-const RADIUS_PX = 6;
+// Constant GROUND footprint: radius doubles per zoom level so a circle covers a
+// fixed real-world area at every zoom (same technique as the demand overlay).
+// BASE_RADIUS is the pixel radius at REF_ZOOM; the two anchor stops lie on the
+// same 2^(zoom−REF) curve, so the exponential-2 interpolation reproduces it
+// exactly across the whole zoom range. Sized so neighbors (~150–600 m spacing)
+// overlap into a continuous field at city zoom.
+const BASE_RADIUS = 8; // px at REF_ZOOM
+const REF_ZOOM = 11;
+const Z_LO = 0;
+const Z_HI = 24;
+const radiusExpr = (): unknown => ([
+  'interpolate', ['exponential', 2], ['zoom'],
+  Z_LO, BASE_RADIUS * 2 ** (Z_LO - REF_ZOOM),
+  Z_HI, BASE_RADIUS * 2 ** (Z_HI - REF_ZOOM),
+]);
 
 /** Register source + (hidden) field circle layer. Idempotent via the API's upsert. */
 export function registerHeatmap(api: ModdingAPI): void {
@@ -93,11 +103,12 @@ export function registerHeatmap(api: ModdingAPI): void {
     source: HEAT_SOURCE_ID,
     layout: { visibility: 'none' },
     paint: {
-      'circle-radius': RADIUS_PX,
-      // Color encodes the absolute value; identical at every zoom, no stacking.
+      'circle-radius': radiusExpr(),
+      // Base color = the absolute per-site value (fixed at every zoom); the soft
+      // translucent edge lets dense clusters overlap into a hotter, denser read.
       'circle-color': ['interpolate', ['linear'], ['get', 't'], 0, RAMP_LOW, 0.5, RAMP_MID, 1, RAMP_HIGH],
-      'circle-blur': 0,
-      'circle-opacity': 1,
+      'circle-blur': 0.6,
+      'circle-opacity': 0.45,
     },
   });
 }

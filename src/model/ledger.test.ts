@@ -494,3 +494,32 @@ test('clearAllInduced: drops materialized records, keeps ptSeq, resets densify',
   assert.equal(fresh.materialized, undefined);
   assert.equal(fresh.sites, undefined);
 });
+
+// --- Voronoi subdivision: split-pressure cells -------------------------------
+
+test('serialize round-trips cells sparsely (zeros pruned)', () => {
+  const led = newLedger();
+  led.cells = { 'induced-pt:0': 1200, n1: 0 };
+  const back = deserializeFromStore(serializeForStore(led));
+  assert.deepEqual(back.cells, { 'induced-pt:0': 1200 });
+});
+
+test('materialized records without siteId round-trip and recreate', () => {
+  const led = newLedger();
+  led.pops['induced:0'] = { residenceId: 'induced-pt:0', jobId: 'induced-pt:0' };
+  led.materialized = { 'induced-pt:0': { location: [1, 2] } };
+  const back = deserializeFromStore(serializeForStore(led));
+  assert.deepEqual(back.materialized, led.materialized);
+  const dd: DemandData = { points: new Map(), popsMap: new Map() };
+  const r = recreateMaterializedPoints(dd, back);
+  assert.equal(r.recreated, 1);
+  assert.deepEqual(dd.points.get('induced-pt:0')!.location, [1, 2]);
+});
+
+test('clearAllInduced drops cells', () => {
+  const dd: DemandData = { points: new Map(), popsMap: new Map() };
+  const led = newLedger();
+  led.cells = { x: 500 };
+  const { ledger: fresh } = clearAllInduced(dd, led, DEFAULT_CONFIG);
+  assert.equal(fresh.cells, undefined);
+});

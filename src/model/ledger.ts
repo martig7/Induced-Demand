@@ -60,7 +60,13 @@ export interface LedgerState {
    * here BEFORE the pop roster is restored. GC: a record no roster pop references
    * is dropped instead of re-created (the site returns to candidate duty).
    */
-  materialized?: Record<string, { location: [number, number]; siteId: string }>;
+  materialized?: Record<string, { location: [number, number]; siteId?: string }>;
+  /**
+   * Split-pressure accumulators per Voronoi cell, keyed by anchor point id.
+   * Sparse (nonzero only). Pressure accrues ∝ deficit × fill (spec 2026-07-18)
+   * and a split consumes SPLIT_THRESHOLD.
+   */
+  cells?: Record<string, number>;
   /** Densification ceiling multiplier (spec §3); monotone, default 1. */
   densify?: number;
   /** Monotonic counter for induced-pt ids (never reused). */
@@ -249,6 +255,11 @@ export function serializeForStore(ledger: LedgerState): string {
   if (ledger.materialized && Object.keys(ledger.materialized).length > 0) {
     payload.materialized = ledger.materialized;
   }
+  if (ledger.cells) {
+    const cells: Record<string, number> = {};
+    for (const [id, v] of Object.entries(ledger.cells)) if (v !== 0) cells[id] = v;
+    if (Object.keys(cells).length > 0) payload.cells = cells;
+  }
   if (ledger.densify !== undefined && ledger.densify !== 1) payload.densify = ledger.densify;
   if (ledger.ptSeq) payload.ptSeq = ledger.ptSeq;
   return JSON.stringify(payload);
@@ -270,6 +281,7 @@ export function deserializeFromStore(s: string | null | undefined): LedgerState 
     }
     if (o.sites && typeof o.sites === 'object') led.sites = o.sites;
     if (o.materialized && typeof o.materialized === 'object') led.materialized = o.materialized;
+    if (o.cells && typeof o.cells === 'object') led.cells = o.cells;
     if (typeof o.densify === 'number' && o.densify >= 1) led.densify = o.densify;
     if (typeof o.ptSeq === 'number') led.ptSeq = o.ptSeq;
     return led;
@@ -382,6 +394,7 @@ export function clearAllInduced(
   fresh.ptSeq = ledger.ptSeq; // point ids are never reused
   // materialized/sites/densify deliberately NOT carried: cleared points husk out
   // in-session and are GC'd at the next load; densification restarts from 1.
+  // cells (split pressure) deliberately dropped with materialized/sites
   const ids = new Set<string>(Object.keys(ledger.pops));
   for (const id of dd.popsMap.keys()) if (isInduced(id)) ids.add(id);
   let removed = 0;

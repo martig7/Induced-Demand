@@ -32,8 +32,8 @@ export interface FieldDeps {
 export interface BuildSitesOpts {
   dd: DemandData;
   stations: Station[];
-  /** ledger.materialized: point id → { location, siteId }. */
-  materialized: Record<string, { location: Coordinate; siteId: string }>;
+  /** ledger.materialized: point id → { location, siteId? } (siteId legacy-optional). */
+  materialized: Record<string, { location: Coordinate; siteId?: string }>;
   catchmentM: number;
   deps: FieldDeps;
   /** City code — sampler seed prefix. */
@@ -62,7 +62,7 @@ export function createSiteBuilder(opts: BuildSitesOpts): SiteBuilder {
   const sites: Site[] = [];
   const takenSiteIds = new Map<string, string>(); // nominal site id → point id
   for (const [pid, rec] of Object.entries(opts.materialized)) {
-    takenSiteIds.set(rec.siteId, pid);
+    if (rec.siteId !== undefined) takenSiteIds.set(rec.siteId, pid);
   }
 
   // Natives + materialized points: occupied sites, and blockers in the ONE
@@ -75,7 +75,7 @@ export function createSiteBuilder(opts: BuildSitesOpts): SiteBuilder {
     const a = deps.accessAt(p.location);
     blockers.insert(p.location, deps.spacingAt(p.location));
     sites.push({
-      id: rec ? rec.siteId : p.id,
+      id: rec?.siteId ?? p.id,
       pointId: p.id,
       location: p.location,
       accessRes: a.res,

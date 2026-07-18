@@ -107,6 +107,18 @@ export function rampColor(t: number): [number, number, number] {
   return RAMP[RAMP.length - 1][1];
 }
 
+/**
+ * Baked-raster resolution: the longest grid dimension in pixels. Higher = finer
+ * detail and less blockiness when zoomed in, at a roughly quadratic bake cost.
+ */
+const GRID_MAX = 1024;
+/**
+ * Gaussian reach (m). Kernels must overlap enough to stay continuous over the
+ * ~150–600 m site spacing, but a tight kernel keeps dense high-value clusters as
+ * distinct bright cores instead of smearing them into one flat hot blob.
+ */
+const KERNEL_METERS = 400;
+
 export interface RasterOptions {
   /** Longest grid dimension in pixels (the shorter side keeps aspect). */
   gridMax?: number;
@@ -129,8 +141,8 @@ export interface FieldRaster {
  * pixel with a degenerate bbox (the caller hides the layer anyway).
  */
 export function rasterizeField(features: HeatFeature[], opts: RasterOptions = {}): FieldRaster {
-  const gridMax = opts.gridMax ?? 384;
-  const kernelMeters = opts.kernelMeters ?? 700;
+  const gridMax = opts.gridMax ?? GRID_MAX;
+  const kernelMeters = opts.kernelMeters ?? KERNEL_METERS;
   if (features.length === 0) {
     return { data: new Uint8ClampedArray(4), width: 1, height: 1, bbox: [0, 0, 0, 0] };
   }

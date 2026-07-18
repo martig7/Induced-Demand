@@ -5,11 +5,14 @@ import { buildHeatFeatures } from './heatmap';
 import { newLedger } from '../model/ledger';
 import { DEFAULT_CONFIG } from './../model/config';
 
-const sites: Site[] = [
+// 'b' and 'c' model the legacy empty-candidate shape (pointId: null) that the
+// pressure view's ledger.sites branch still reads; Task 7 removes that branch
+// and these fixtures with it.
+const sites = [
   { id: 'a', pointId: 'a', location: [0, 0], accessRes: 0.9, accessCom: 0.2 },
   { id: 'b', pointId: null, location: [1, 1], accessRes: 0.4, accessCom: 0.7 },
   { id: 'c', pointId: null, location: [2, 2], accessRes: 0.001, accessCom: 0.001 },
-];
+] as unknown as Site[];
 
 test('accessRes view: t is the ABSOLUTE value; negligible dropped', () => {
   const fc = buildHeatFeatures(sites, newLedger(), 'accessRes', DEFAULT_CONFIG);
@@ -24,8 +27,8 @@ test('accessRes view: t is the ABSOLUTE value; negligible dropped', () => {
 test('absolute scale: a site\'s color is independent of the rest of the field', () => {
   // 0.5 must map to t=0.5 whether or not a brighter 0.9 site is present.
   const withBright: Site[] = [
-    { id: 'x', pointId: null, location: [0, 0], accessRes: 0.5, accessCom: 0 },
-    { id: 'y', pointId: null, location: [1, 1], accessRes: 0.9, accessCom: 0 },
+    { id: 'x', pointId: 'x', location: [0, 0], accessRes: 0.5, accessCom: 0 },
+    { id: 'y', pointId: 'y', location: [1, 1], accessRes: 0.9, accessCom: 0 },
   ];
   const alone: Site[] = [withBright[0]];
   const tx = (fc: ReturnType<typeof buildHeatFeatures>) =>

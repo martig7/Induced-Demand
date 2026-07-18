@@ -44,10 +44,10 @@ import {
   stationMasses, computeOpportunities, buildAccessIndex,
   type StationOpportunity, type AccessIndex,
 } from './model/opportunity';
-import { fitDensity, spacingAt, massAt, type DensityFit, type FitInputPoint } from './model/densityFit';
+import { fitDensity, massAt, type DensityFit, type FitInputPoint } from './model/densityFit';
 import {
-  createSiteBuilder, refreshSiteAccess, computeStructuralHash, computeServiceHash,
-  type Site, type BuildSitesOpts,
+  buildPointSites, refreshSiteAccess, computeStructuralHash, computeServiceHash,
+  type Site,
 } from './model/field';
 import { buildWaterIndex, type WaterIndex, type OceanDepthFile } from './game/waterIndex';
 import { recreateMaterializedPoints } from './model/ledger';
@@ -312,50 +312,25 @@ if (!api) {
     };
   }
 
-  /** Fit + site-builder options for a rebuild, given fresh weights. */
-  function prepareBuild(
-    dd: DemandData,
-    accessIdx: AccessIndex,
-    stations: Station[],
-    water: WaterIndex | null,
-    city: string,
-  ): { fit: DensityFit; buildOpts: BuildSitesOpts } {
+  /** Density fit for a rebuild, given fresh weights (drives massAt targeting). */
+  function computeFit(dd: DemandData, accessIdx: AccessIndex): DensityFit {
     const fitInput: FitInputPoint[] = [...dd.points.values()].map((p) => {
       const a = accessIdx.at(p.location);
       return { location: p.location, residents: p.residents, jobs: p.jobs, access: Math.max(a.res, a.com) };
     });
-    const fit = fitDensity(fitInput, DEFAULT_CONFIG);
-    return {
-      fit,
-      buildOpts: {
-        dd,
-        stations,
-        materialized: ledger.materialized ?? {},
-        catchmentM: DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED,
-        deps: {
-          spacingAt: (c) => {
-            const a = accessIdx.at(c);
-            return spacingAt(fit, Math.max(a.res, a.com));
-          },
-          accessAt: (c) => accessIdx.at(c),
-          isWater: (c) => water?.isWater(c) ?? false,
-        },
-        seedPrefix: city,
-        cfg: DEFAULT_CONFIG,
-      },
-    };
+    return fitDensity(fitInput, DEFAULT_CONFIG);
   }
 
   /** Increments to cancel an in-flight chunked rebuild (newer build/city/generation wins). */
   let fieldBuildGen = 0;
 
   /**
-   * Tier 1 — full structural rebuild (spec §8), CHUNKED: the sampling loop is
-   * time-boxed (~12 ms per slice) and yields to the event loop between slices,
-   * so a 10k-site rebuild never blocks a frame (the synchronous version was
-   * measured at 161 s in-game). The field snapshot is swapped only on
-   * completion — consumers always see a complete, consistent field. Runs at
-   * init and debounced on route created/deleted.
+   * Tier 1 — full structural rebuild (spec §8): weights, density fit, and the
+   * point-site list (sites are exactly the live demand points). Yields to the
+   * event loop between phases with a generation token so a newer build/city
+   * cancels an in-flight one; the field snapshot is swapped only on completion —
+   * consumers always see a complete, consistent field. Runs at init and
+   * debounced on route created/deleted.
    */
   async function rebuildField(): Promise<void> {
     const city = key();
@@ -382,27 +357,10 @@ if (!api) {
     await yieldToLoop();
     if (stale()) return;
 
-    // Phase B: density fit (ms-scale).
-    const { fit, buildOpts } = prepareBuild(dd, weights.accessIdx, weights.stations, water, city);
-    const builder = createSiteBuilder(buildOpts);
-    await yieldToLoop();
-    if (stale()) return;
-
-    // Phase C: sampling, time-boxed slices.
-    let chunks = 0;
-    let maxChunkMs = 0;
-    for (;;) {
-      const chunkStart = performance.now();
-      let more = true;
-      while (more && performance.now() - chunkStart < 12) more = builder.step();
-      chunks++;
-      maxChunkMs = Math.max(maxChunkMs, performance.now() - chunkStart);
-      if (!more) break;
-      await yieldToLoop();
-      if (stale()) return;
-    }
-
-    const sites = builder.finish();
+    // Phase B: density fit + point sites (both ms-scale; Task 6 re-adds a
+    // chunked phase here for the subdivision lattice).
+    const fit = computeFit(dd, weights.accessIdx);
+    const sites = buildPointSites(dd, (c) => weights.accessIdx.at(c));
     session.field = {
       city, sites,
       graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,
@@ -410,11 +368,7 @@ if (!api) {
       water, waterFailed,
     };
     const total = performance.now() - t0;
-    perf.record('tier1', PERF_BUDGETS.tier1Total, total,
-      `${sites.length} sites, ${chunks} chunks, max ${maxChunkMs.toFixed(1)}ms`);
-    if (maxChunkMs > PERF_BUDGETS.tier1Chunk) {
-      console.warn(`${TAG} tier1 chunk over budget: ${maxChunkMs.toFixed(1)}ms > ${PERF_BUDGETS.tier1Chunk}ms`);
-    }
+    perf.record('tier1', PERF_BUDGETS.tier1Total, total, `${sites.length} sites`);
     bumpHeat();
   }
 
@@ -428,10 +382,8 @@ if (!api) {
     fieldBuildGen++; // cancel any in-flight chunked build; this snapshot is newer
     perf.track('tier1', PERF_BUDGETS.tier1, () => {
       const weights = computeWeights(dd);
-      const { fit, buildOpts } = prepareBuild(dd, weights.accessIdx, weights.stations, water, city);
-      const builder = createSiteBuilder(buildOpts);
-      while (builder.step()) { /* run to completion */ }
-      const sites = builder.finish();
+      const fit = computeFit(dd, weights.accessIdx);
+      const sites = buildPointSites(dd, (c) => weights.accessIdx.at(c));
       ensureSession().field = {
         city, sites,
         graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,

@@ -212,6 +212,29 @@ typings; now marked optional + feature-detected).
 Anchors: `assignCommuteTimes`, `generateTimeSlots`,
 `generateDepartureTimeBasedOnDemand`, `TIME_OF_DAY_RANGES`, `MIN_GAP_MINUTES`.
 
+## Route scheduling & timings (verified 2026-07-17)
+
+- `Route.stComboTimings[]` (`{stNodeId, stNodeIndex, arrivalTime, departureTime}`)
+  carries the game's own per-stop timings; cycle time = last entry's
+  `arrivalTime` (the game's `getRouteCycleTime`, fallback
+  `RULES.TRAIN_SCHEDULE_TRANSITION_WINDOW`).
+- `Route.trainSchedule.{highDemand, mediumDemand, lowDemand, veryLowDemand?}`
+  are **train counts** (the game takes `Math.max` of them for fleet math), NOT
+  headway seconds.
+- Timetable mode: `Route.timetableSchedule.mode === 'timetable'` with
+  `periods[].headwaySeconds`; the game's `computeTrainCountFromHeadway` is
+  `floor(cycle/headway)`.
+- Do NOT derive service level from `getTrains()` — live counts sample whichever
+  demand period is currently running.
+
+## Hook coverage for route changes (verified 2026-07-17)
+
+`triggerRouteCreated` fires only from `generateRoute` (brand-new routes) and
+`triggerRouteDeleted` only from `deleteRoute`. The temp-route commit path
+(`tempParentId`) fires **no hook** — route EDITS are invisible to events. Any
+mod needing to react to route edits must poll a structural signature (route ids
++ per-route station-id lists); this mod compares one at each day end.
+
 ## `utils.loadCityData` is broken (v1.4.10) — read the data server instead
 
 `api.utils.loadCityData(path)` can never succeed in this build. Its body does:

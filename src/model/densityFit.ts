@@ -114,3 +114,13 @@ export function creepDensify(current: number, sigma: number, cfg: InducedDemandC
   if (sigma <= cfg.SAT_THRESHOLD) return current;
   return current * (1 + cfg.RHO_DENSIFY * (sigma - cfg.SAT_THRESHOLD));
 }
+
+/**
+ * Areal density the access level supports: people per m², derived from the two
+ * fitted curves (mass per point ÷ the area one point serves at that spacing).
+ * Feeds the lattice's per-cell supported-mass integral (spec 2026-07-18).
+ */
+export function supportedDensityAt(fit: DensityFit, access: number): number {
+  const r = spacingAt(fit, access);
+  return massAt(fit, access) / (r * r);
+}

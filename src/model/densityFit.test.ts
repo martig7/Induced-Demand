@@ -69,3 +69,17 @@ test('creepDensify: grows only above threshold, never shrinks', () => {
   assert.ok(grown > 1 && grown < 1.001, `slow creep, got ${grown}`);
   assert.equal(creepDensify(1.5, 0, cfg), 1.5); // monotone
 });
+
+// --- supported density (Voronoi subdivision) --------------------------------
+
+import { supportedDensityAt } from './densityFit';
+
+test('supportedDensityAt: massAt / spacingAt² (people per m²), higher where access is higher', () => {
+  const fit = fitDensity(city(), cfg);
+  const dHigh = supportedDensityAt(fit, 0.9);
+  const dLow = supportedDensityAt(fit, 0.1);
+  assert.ok(Math.abs(dHigh - massAt(fit, 0.9) / spacingAt(fit, 0.9) ** 2) < 1e-12);
+  assert.ok(dHigh > dLow, `${dHigh} > ${dLow}`);
+  // sanity: a plausible urban magnitude (people per m² is small)
+  assert.ok(dHigh > 0 && dHigh < 1);
+});

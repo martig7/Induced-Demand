@@ -62,6 +62,15 @@ export interface InducedDemandConfig {
   RHO_DENSIFY: number;
   /** Saturation (filled induced headroom fraction) above which densify creeps. */
   SAT_THRESHOLD: number;
+  // --- Voronoi subdivision (spec 2026-07-18) ---
+  /** Lattice sample pitch (m) for cell integration. */
+  LATTICE_M: number;
+  /** Split-pressure gain per day: pressure += SPLIT_RATE * deficit * fill. */
+  SPLIT_RATE: number;
+  /** Pressure (people-days) at which a cell may split; also the accumulator cap. */
+  SPLIT_THRESHOLD: number;
+  /** Global cap on cell splits per day. */
+  MAX_SPLITS_PER_DAY: number;
 }
 
 export const DEFAULT_CONFIG: InducedDemandConfig = {
@@ -94,4 +103,8 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   JOB_SHARE: 0.5,
   RHO_DENSIFY: 0.002,
   SAT_THRESHOLD: 0.8,
+  LATTICE_M: 250,
+  SPLIT_RATE: 1,
+  SPLIT_THRESHOLD: 50_000,
+  MAX_SPLITS_PER_DAY: 3,
 };

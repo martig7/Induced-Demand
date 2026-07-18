@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isInduced, addInducedPop, removeInducedPop, deferredRemovalPopCount, countInducedPops,
-  deferInducedPopRemoval, ensureTombstoneStub,
+  deferInducedPopRemoval, ensureTombstoneStub, zeroModeShare, createInducedPoint,
 } from './popFactory';
 import { DEFAULT_CONFIG } from './config';
 import type { DemandData, DemandPoint } from '../types/game-state';
@@ -147,4 +147,16 @@ test('ensureTombstoneStub creates nothing when there are no demand points to ref
   const empty: DemandData = { points: new Map(), popsMap: new Map() };
   assert.equal(ensureTombstoneStub(empty, 'induced:1', undefined, DEFAULT_CONFIG), false);
   assert.equal(empty.popsMap.size, 0);
+});
+
+// --- access-field infill: point factory -----------------------------------
+
+test('createInducedPoint: empty point with zeroed runtime fields', () => {
+  const dd: DemandData = { points: new Map(), popsMap: new Map() };
+  const p = createInducedPoint(dd, 'induced-pt:0', [5, 6]);
+  assert.equal(dd.points.get('induced-pt:0'), p);
+  assert.equal(p.residents, 0);
+  assert.equal(p.jobs, 0);
+  assert.deepEqual(p.popIds, []);
+  assert.deepEqual(p.residentModeShare, zeroModeShare());
 });

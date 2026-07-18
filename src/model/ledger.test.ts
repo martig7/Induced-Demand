@@ -4,7 +4,8 @@ import {
   newLedger, captureBaselines, reconcileBaselines, reconcileInducedPops, isPristineLedger,
   serializeForStore, deserializeFromStore, loadFromStore, saveToStore, applyPendingAccum,
   mergePendingRemovals, restoreTombstoneStubs, clearAllInduced, TOMBSTONE_CAP,
-  queueInducedPopRemoval, retirePendingRemovals, type KVStore, type LedgerState,
+  queueInducedPopRemoval, retirePendingRemovals, recreateMaterializedPoints,
+  type KVStore, type LedgerState,
 } from './ledger';
 import { DEFAULT_CONFIG } from './config';
 import { deferInducedPopRemoval } from './popFactory';
@@ -394,4 +395,75 @@ test('reconcileInducedPops never adopts an inert (size-0) stub as a live pop', (
   const led = newLedger();
   reconcileInducedPops(dd, led, DEFAULT_CONFIG);
   assert.equal(led.pops['induced:3'], undefined);
+});
+
+// --- access-field infill: ledger extensions -------------------------------
+
+test('serialize/deserialize round-trips sites, materialized, densify, ptSeq', () => {
+  const led = newLedger();
+  led.sites = { 'C:s1:0': [120, 0], 'C:s1:1': [0, 0] }; // second is zero → pruned
+  led.materialized = { 'induced-pt:0': { location: [1, 2], siteId: 'C:s1:4' } };
+  led.densify = 1.25;
+  led.ptSeq = 3;
+  const back = deserializeFromStore(serializeForStore(led));
+  assert.deepEqual(back.sites, { 'C:s1:0': [120, 0] });
+  assert.deepEqual(back.materialized, led.materialized);
+  assert.equal(back.densify, 1.25);
+  assert.equal(back.ptSeq, 3);
+});
+
+test('serialize: defaults are omitted (no densify=1, no empty records)', () => {
+  const led = newLedger();
+  led.densify = 1;
+  led.sites = {};
+  const payload = JSON.parse(serializeForStore(led));
+  assert.equal(payload.densify, undefined);
+  assert.equal(payload.sites, undefined);
+  assert.equal(payload.materialized, undefined);
+});
+
+test('recreateMaterializedPoints: recreates referenced, GCs unreferenced', () => {
+  const dd: DemandData = { points: new Map(), popsMap: new Map() };
+  const led = newLedger();
+  led.pops['induced:0'] = { residenceId: 'induced-pt:0', jobId: 'native1' };
+  led.materialized = {
+    'induced-pt:0': { location: [1, 2], siteId: 's' },   // referenced by roster
+    'induced-pt:1': { location: [3, 4], siteId: 't' },   // orphaned → GC
+  };
+  const r = recreateMaterializedPoints(dd, led);
+  assert.equal(r.recreated, 1);
+  assert.equal(r.dropped, 1);
+  const p = dd.points.get('induced-pt:0');
+  assert.ok(p);
+  assert.equal(p!.residents, 0);
+  assert.equal(p!.jobs, 0);
+  assert.deepEqual(p!.location, [1, 2]);
+  assert.equal(led.materialized!['induced-pt:1'], undefined);
+});
+
+test('recreateMaterializedPoints: existing points are left untouched', () => {
+  const dd: DemandData = { points: new Map(), popsMap: new Map() };
+  const led = newLedger();
+  led.pops['induced:0'] = { residenceId: 'induced-pt:0', jobId: 'induced-pt:0' };
+  led.materialized = { 'induced-pt:0': { location: [1, 2], siteId: 's' } };
+  recreateMaterializedPoints(dd, led);
+  const p = dd.points.get('induced-pt:0')!;
+  p.residents = 999; // simulate later state
+  const r2 = recreateMaterializedPoints(dd, led);
+  assert.equal(r2.recreated, 0);
+  assert.equal(dd.points.get('induced-pt:0')!.residents, 999);
+});
+
+test('clearAllInduced: drops materialized records, keeps ptSeq, resets densify', () => {
+  const dd: DemandData = { points: new Map(), popsMap: new Map() };
+  const led = newLedger();
+  led.ptSeq = 5;
+  led.densify = 1.4;
+  led.materialized = { 'induced-pt:0': { location: [1, 2], siteId: 's' } };
+  led.sites = { s2: [50, 0] };
+  const { ledger: fresh } = clearAllInduced(dd, led, DEFAULT_CONFIG);
+  assert.equal(fresh.ptSeq, 5);
+  assert.equal(fresh.densify ?? 1, 1);
+  assert.equal(fresh.materialized, undefined);
+  assert.equal(fresh.sites, undefined);
 });

@@ -1,5 +1,5 @@
 import type { Coordinate } from '../types/core';
-import type { DemandData, Pop } from '../types/game-state';
+import type { DemandData, DemandPoint, ModeChoiceStats, Pop } from '../types/game-state';
 import type { InducedDemandConfig } from './config';
 import { commuteTimesFor, DEFAULT_SLOT_SET, type SlotSet } from './commuteTimes';
 import { DEFAULT_DRIVING_MODEL, type DrivingModel } from './drivingModel';
@@ -132,6 +132,29 @@ export function ensureTombstoneStub(
   stub.size = 0; // inert: nothing in the game divides by a pop's size — it is only summed
   dd.popsMap.set(id, stub);
   return true;
+}
+
+/** Runtime mode-share zeroes for a freshly materialized point. */
+export function zeroModeShare(): ModeChoiceStats {
+  return { walking: 0, driving: 0, transit: 0, unknown: 0 };
+}
+
+/**
+ * Materialize an empty induced demand point (spec §5). The sim overwrites the
+ * mode-share fields on its next cycle; residents/jobs stay 0 until pops attach.
+ */
+export function createInducedPoint(dd: DemandData, id: string, location: Coordinate): DemandPoint {
+  const p: DemandPoint = {
+    id,
+    location,
+    residents: 0,
+    jobs: 0,
+    popIds: [],
+    residentModeShare: zeroModeShare(),
+    workerModeShare: zeroModeShare(),
+  };
+  dd.points.set(id, p);
+  return p;
 }
 
 /**

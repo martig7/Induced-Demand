@@ -2,6 +2,7 @@ import type { DemandData } from '../types/game-state';
 import type { InducedDemandConfig } from './config';
 import {
   INDUCED_PREFIX, isInduced, addInducedPop, detachInducedPop, ensureTombstoneStub,
+  createInducedPoint,
 } from './popFactory';
 import { DEFAULT_SLOT_SET, type SlotSet } from './commuteTimes';
 import { DEFAULT_DRIVING_MODEL, type DrivingModel } from './drivingModel';
@@ -51,6 +52,19 @@ export interface LedgerState {
    * tick error every tick. FIFO-capped at TOMBSTONE_CAP (insertion order).
    */
   tombstones?: Record<string, InducedPopRecord>;
+  /** Candidate-site growth accumulators, sparse, keyed by site id as [res, job]. */
+  sites?: Record<string, [number, number]>;
+  /**
+   * Demand points this mod materialized. The game drops them on every real load
+   * (city-file-authoritative merge — spec §facts 1), so they are re-created from
+   * here BEFORE the pop roster is restored. GC: a record no roster pop references
+   * is dropped instead of re-created (the site returns to candidate duty).
+   */
+  materialized?: Record<string, { location: [number, number]; siteId: string }>;
+  /** Densification ceiling multiplier (spec §3); monotone, default 1. */
+  densify?: number;
+  /** Monotonic counter for induced-pt ids (never reused). */
+  ptSeq?: number;
 }
 
 /** Movements only survive a few save cycles; a bounded FIFO of retired ids suffices. */
@@ -225,6 +239,18 @@ export function serializeForStore(ledger: LedgerState): string {
   if (ledger.tombstones && Object.keys(ledger.tombstones).length > 0) {
     payload.tombstones = capTombstones(ledger.tombstones);
   }
+  if (ledger.sites) {
+    const sites: Record<string, [number, number]> = {};
+    for (const [id, [r, j]] of Object.entries(ledger.sites)) {
+      if (r !== 0 || j !== 0) sites[id] = [r, j];
+    }
+    if (Object.keys(sites).length > 0) payload.sites = sites;
+  }
+  if (ledger.materialized && Object.keys(ledger.materialized).length > 0) {
+    payload.materialized = ledger.materialized;
+  }
+  if (ledger.densify !== undefined && ledger.densify !== 1) payload.densify = ledger.densify;
+  if (ledger.ptSeq) payload.ptSeq = ledger.ptSeq;
   return JSON.stringify(payload);
 }
 
@@ -242,6 +268,10 @@ export function deserializeFromStore(s: string | null | undefined): LedgerState 
     if (o.tombstones && typeof o.tombstones === 'object') {
       led.tombstones = capTombstones(o.tombstones);
     }
+    if (o.sites && typeof o.sites === 'object') led.sites = o.sites;
+    if (o.materialized && typeof o.materialized === 'object') led.materialized = o.materialized;
+    if (typeof o.densify === 'number' && o.densify >= 1) led.densify = o.densify;
+    if (typeof o.ptSeq === 'number') led.ptSeq = o.ptSeq;
     return led;
   } catch {
     return newLedger();
@@ -307,6 +337,36 @@ export function restoreTombstoneStubs(
 }
 
 /**
+ * Re-create materialized points the load dropped (run BEFORE reconcileInducedPops —
+ * roster pops may reference `induced-pt:*` endpoints and the commute worker
+ * requires live endpoints). Unreferenced records are garbage-collected: their
+ * pops are gone, so the point would be a permanent husk.
+ */
+export function recreateMaterializedPoints(
+  dd: DemandData,
+  ledger: LedgerState,
+): { recreated: number; dropped: number } {
+  let recreated = 0, dropped = 0;
+  if (!ledger.materialized) return { recreated, dropped };
+  const referenced = new Set<string>();
+  for (const rec of Object.values(ledger.pops)) {
+    referenced.add(rec.residenceId);
+    referenced.add(rec.jobId);
+  }
+  for (const [pid, rec] of Object.entries(ledger.materialized)) {
+    if (dd.points.has(pid)) continue;
+    if (!referenced.has(pid)) {
+      delete ledger.materialized[pid];
+      dropped++;
+      continue;
+    }
+    createInducedPoint(dd, pid, rec.location);
+    recreated++;
+  }
+  return { recreated, dropped };
+}
+
+/**
  * "Clear induced demand": detach every induced pop (demand reverts) and retire
  * them all as tombstones, returning a fresh ledger that keeps `seq` (ids must
  * never be reused while stubs exist) and the tombstone registry.
@@ -319,6 +379,9 @@ export function clearAllInduced(
   const fresh = newLedger();
   fresh.seq = ledger.seq;
   fresh.tombstones = { ...(ledger.tombstones ?? {}) };
+  fresh.ptSeq = ledger.ptSeq; // point ids are never reused
+  // materialized/sites/densify deliberately NOT carried: cleared points husk out
+  // in-session and are GC'd at the next load; densification restarts from 1.
   const ids = new Set<string>(Object.keys(ledger.pops));
   for (const id of dd.popsMap.keys()) if (isInduced(id)) ids.add(id);
   let removed = 0;

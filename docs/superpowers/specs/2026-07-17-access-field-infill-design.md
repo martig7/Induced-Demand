@@ -40,8 +40,10 @@ Realism requirements from the user:
    (per-stNode arrival/departure → ride times incl. dwell),
    `Station.nearbyStations` (`{stationId, walkingTime}` — the game's own
    transfer basis), `getStationGroups()`/`getSiblingStationIds()`
-   (interchanges), `Route.trainSchedule` + `idealTrainCount` + `getTrains()`
-   (headway → expected wait ≈ headway/2, cycle time from last timing arrival).
+   (interchanges), `Route.trainSchedule` + `idealTrainCount` (peak scheduled
+   service → headway = cycle time ÷ peak trains, expected wait ≈ headway/2;
+   cycle time from last timing arrival). Live `getTrains()` is deliberately
+   unused — it samples the current demand period, not scheduled service.
 5. **Existing invariants carry over**: every pop in `popsMap` must reference
    live points (commute-worker throws otherwise); retired pops are size-0
    tombstone stubs, never deleted; `loadGuard` classifies real loads.
@@ -76,8 +78,14 @@ Replaces the line-count connectivity term (`CONNECTIVITY_REF` retires).
 - **Station graph** (rebuilt on network change only): ride edges from
   `stComboTimings`; transfer edges from `nearbyStations` walk times;
   interchange edges (≈free) from station groups/siblings; per-route boarding
-  wait from headway (cycle time ÷ train count, halved). Fallback if timings
-  are missing on a route: distance ÷ nominal transit speed, same structure.
+  wait from **route-intrinsic data only** — cycle time (last `stComboTimings`
+  arrival) ÷ peak scheduled trains (`trainSchedule.highDemand`,
+  `idealTrainCount` fallback), halved. Peak service is the right basis: commute
+  departures cluster in the 7–10/16–19 peaks that run high-demand service.
+  Never read `getTrains()` — live counts sample whichever demand period is
+  currently running (overnight reads would price access off low service).
+  Fallback if timings are missing on a route: distance ÷ nominal transit
+  speed, same structure.
 - **Opportunity per station** (Dijkstra per station, network change only):
   `O_jobs(s) = Σ_s' jobsMass(s')·exp(−t(s,s')/TAU_REACH)` and likewise
   `O_res(s)` with residents mass. `mass(s')` = residents/jobs within s'
@@ -183,21 +191,25 @@ it is what makes the *native* dot layer notice newly materialized points.
 Two-tier trigger model (user decision — overlap heavy work with build
 gestures; never chase train events):
 
-- **Tier 1 — structural rebuild** on `onRouteCreated` / `onRouteDeleted` /
-  `onStationBuilt` / `onStationDeleted`, **debounced** (short idle delay —
-  blueprints and batch edits fire event bursts). Full pass: graph topology,
-  new-catchment sampling, density fit, Dijkstra, access cache, heatmap
-  rebuild. Lands right after the user's edit, where a few ms is
+- **Tier 1 — structural rebuild** on `onRouteCreated` / `onRouteDeleted`
+  only, **debounced** (short idle delay — batch edits fire event bursts).
+  NOT `onStationBuilt`/`onStationDeleted`: stations without routes do not
+  affect the access field (`toAccessStations` filters unrouted stations), so
+  blueprint/track construction would fire no-op rebuilds. Full pass: graph
+  topology, new-catchment sampling, density fit, Dijkstra, access cache,
+  heatmap rebuild. Lands right after the user's edit, where a few ms is
   perceptually free.
 - **Tier 2 — weight refresh** on day end, every day, before the growth step:
-  re-read live train counts → headway/wait weights → Dijkstra → opportunity →
-  cached per-site access. No subscription to `onTrainSpawned`/`onTrainDeleted`
-  (users batch-add trains; per-event recompute is a perf hazard). Side
-  benefit: demand-mass sums refresh daily, so opportunity tracks the growing
-  city, not just network edits.
+  re-read `getRoutes()` → wait weights from route-intrinsic schedule data
+  (see §2 — cycle time ÷ peak scheduled trains; **no train reads**) →
+  Dijkstra → opportunity → cached per-site access. Needed daily because
+  adding trains updates a route's schedule without firing any route hook.
+  Side benefit: demand-mass sums refresh daily, so opportunity tracks the
+  growing city, not just network edits.
 - **Safety net**: Tier 2 compares a cheap structural hash (route ids +
   per-route station-id lists); a mismatch promotes the refresh to a Tier 1
-  rebuild. Covers any route-edit path that fires no hook.
+  rebuild. Covers any structural edit that fires no route hook (in-place
+  route edits if unhooked, station deletion under a route).
 
 | Work | When | Cost |
 |---|---|---|

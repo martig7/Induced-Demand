@@ -11,38 +11,41 @@ const sites: Site[] = [
   { id: 'c', pointId: null, location: [2, 2], accessRes: 0.001, accessCom: 0.001 },
 ];
 
-test('accessRes view: t is value / citywide-max; max site is 1; negligible dropped', () => {
+test('accessRes view: t is the ABSOLUTE value; negligible dropped', () => {
   const fc = buildHeatFeatures(sites, newLedger(), 'accessRes', DEFAULT_CONFIG);
-  assert.equal(fc.maxValue, 0.9); // citywide max of accessRes
-  assert.equal(fc.features.length, 2); // c (0.001/0.9 ≈ 0.001) below MIN_T
+  assert.equal(fc.features.length, 2); // c (0.001) below MIN_T
   const a = fc.features.find((f) => f.properties.id === 'a')!;
   const b = fc.features.find((f) => f.properties.id === 'b')!;
-  assert.equal(a.properties.t, 1); // the citywide-max site is always the hot end
-  assert.ok(Math.abs(b.properties.t - 0.4 / 0.9) < 1e-9);
+  assert.equal(a.properties.t, 0.9); // absolute, NOT normalized to any max
+  assert.equal(b.properties.t, 0.4);
+  assert.equal(fc.maxValue, 0.9);
 });
 
-test('t depends only on the value ratio, so scaling all values leaves colors unchanged', () => {
-  // Halving every access value halves the max too → identical normalized t.
-  const scaled = sites.map((s) => ({ ...s, accessRes: s.accessRes / 2 }));
-  const base = buildHeatFeatures(sites, newLedger(), 'accessRes', DEFAULT_CONFIG);
-  const half = buildHeatFeatures(scaled, newLedger(), 'accessRes', DEFAULT_CONFIG);
-  assert.deepEqual(half.features.map((f) => f.properties.t), base.features.map((f) => f.properties.t));
-  assert.equal(half.maxValue, base.maxValue / 2);
+test('absolute scale: a site\'s color is independent of the rest of the field', () => {
+  // 0.5 must map to t=0.5 whether or not a brighter 0.9 site is present.
+  const withBright: Site[] = [
+    { id: 'x', pointId: null, location: [0, 0], accessRes: 0.5, accessCom: 0 },
+    { id: 'y', pointId: null, location: [1, 1], accessRes: 0.9, accessCom: 0 },
+  ];
+  const alone: Site[] = [withBright[0]];
+  const tx = (fc: ReturnType<typeof buildHeatFeatures>) =>
+    fc.features.find((f) => f.properties.id === 'x')!.properties.t;
+  assert.equal(tx(buildHeatFeatures(withBright, newLedger(), 'accessRes', DEFAULT_CONFIG)), 0.5);
+  assert.equal(tx(buildHeatFeatures(alone, newLedger(), 'accessRes', DEFAULT_CONFIG)), 0.5);
 });
 
-test('pressure view: normalized to the citywide-max accumulator', () => {
+test('pressure view: t = min(1, accum / POP_SIZE), absolute', () => {
   const led = newLedger();
   led.sites = { b: [DEFAULT_CONFIG.POP_SIZE * 2, 0] };
   led.points.a = { baselineResidents: 0, baselineJobs: 0, resAccum: 100, jobAccum: 0 };
   const fc = buildHeatFeatures(sites, led, 'pressure', DEFAULT_CONFIG);
-  assert.equal(fc.maxValue, 2); // b: 2*POP_SIZE / POP_SIZE
   const a = fc.features.find((f) => f.properties.id === 'a')!;
   const b = fc.features.find((f) => f.properties.id === 'b')!;
-  assert.equal(b.properties.t, 1);
-  assert.ok(Math.abs(a.properties.t - (100 / DEFAULT_CONFIG.POP_SIZE) / 2) < 1e-9);
+  assert.equal(b.properties.t, 1); // 2*POP_SIZE clamped
+  assert.ok(Math.abs(a.properties.t - 100 / DEFAULT_CONFIG.POP_SIZE) < 1e-9);
 });
 
-test('empty field: no features, maxValue 0, no divide-by-zero', () => {
+test('empty field: no features, maxValue 0, no throw', () => {
   const fc = buildHeatFeatures(sites, newLedger(), 'pressure', DEFAULT_CONFIG);
   assert.equal(fc.features.length, 0);
   assert.equal(fc.maxValue, 0);

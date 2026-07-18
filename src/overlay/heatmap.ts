@@ -2,21 +2,21 @@
  * Field heat view (spec §7): the targeting display IS the model's input. Views:
  * residential access, commercial access, growth pressure.
  *
- * NOT a MapLibre `heatmap` layer. That type colors by screen-space accumulated
- * DENSITY, which (a) changes with zoom as kernels overlap differently, and
- * (b) is near-uniform here anyway — the field is deliberately even blue-noise
- * spacing, so density carries almost no signal and the view looked washed out.
- * The signal lives in each site's VALUE, so we encode value as per-feature
- * color normalized to the CITYWIDE MAX of the active view: the hottest color is
- * always the city's current maximum, and because the color is per feature (not
- * an accumulation) it is identical at every zoom. Radius keeps a constant
- * real-world footprint (doubles per zoom level, same technique as the demand
- * overlay), with blur so the even field reads as a smooth surface.
+ * NOT a MapLibre `heatmap` layer, and deliberately free of every zoom/density
+ * coupling that made the field unreadable:
+ *  - Color encodes each site's value on an ABSOLUTE scale (access is already in
+ *    [0,1]; pressure is accum/POP_SIZE clamped to 1), NOT normalized to the
+ *    citywide max — so a given color always means the same value, comparable
+ *    across time and across cities.
+ *  - Circles are a CONSTANT pixel size (no zoom scaling) and fully opaque with
+ *    no blur, so overlapping marks never stack their translucency into a hotter
+ *    color. Color depends only on `t`; zoom and neighbor density change nothing.
  */
 import type { ModdingAPI } from '../types/api';
 import type { InducedDemandConfig } from '../model/config';
 import type { LedgerState } from '../model/ledger';
 import type { Site } from '../model/field';
+import { clamp01 } from '../model/util';
 import { RAMP_LOW, RAMP_MID, RAMP_HIGH } from './overlay';
 
 export const HEAT_SOURCE_ID = 'induced-demand-heat-source';
@@ -27,7 +27,7 @@ export type HeatView = 'off' | 'accessRes' | 'accessCom' | 'pressure';
 export interface HeatFeature {
   type: 'Feature';
   geometry: { type: 'Point'; coordinates: [number, number] };
-  /** `t` = value / citywide-max, in [0,1]; the color ramp reads only this. */
+  /** `t` = the site's ABSOLUTE value in [0,1]; the color ramp reads only this. */
   properties: { id: string; t: number };
 }
 export interface HeatFeatureCollection {
@@ -38,17 +38,21 @@ export interface HeatFeatureCollection {
 }
 
 const EMPTY: HeatFeatureCollection = { type: 'FeatureCollection', features: [], maxValue: 0 };
-/** Drop features whose normalized value is negligible (keeps the layer sparse). */
+/** Drop features below this absolute value (keeps the layer sparse; not a normalizer). */
 const MIN_T = 0.02;
 
-/** Raw per-site value for a view (undivided). */
-function rawValue(s: Site, ledger: LedgerState, view: Exclude<HeatView, 'off'>, cfg: InducedDemandConfig): number {
-  if (view === 'accessRes') return s.accessRes;
-  if (view === 'accessCom') return s.accessCom;
+/**
+ * Absolute [0,1] value for a view. Access scores are already in [0,1]. Pressure
+ * is the accumulator relative to one POP_SIZE of readiness (a site spawns a pop
+ * near accum == POP_SIZE), clamped so a fully-pressured site is the ramp's top.
+ */
+function absoluteValue(s: Site, ledger: LedgerState, view: Exclude<HeatView, 'off'>, cfg: InducedDemandConfig): number {
+  if (view === 'accessRes') return clamp01(s.accessRes);
+  if (view === 'accessCom') return clamp01(s.accessCom);
   const [ra, ja] = s.pointId
     ? [(ledger.points[s.pointId]?.resAccum ?? 0), (ledger.points[s.pointId]?.jobAccum ?? 0)]
     : (ledger.sites?.[s.id] ?? [0, 0]);
-  return Math.max(ra, ja, 0) / cfg.POP_SIZE;
+  return clamp01(Math.max(ra, ja, 0) / cfg.POP_SIZE);
 }
 
 export function buildHeatFeatures(
@@ -57,42 +61,28 @@ export function buildHeatFeatures(
   view: Exclude<HeatView, 'off'>,
   cfg: InducedDemandConfig,
 ): HeatFeatureCollection {
-  // First pass: raw values + the citywide max (the normalizer, so the ramp's
-  // top is always the current city maximum — zoom-independent by construction).
-  const raw: { id: string; loc: [number, number]; v: number }[] = [];
+  const features: HeatFeature[] = [];
   let maxValue = 0;
   for (const s of sites) {
-    const v = rawValue(s, ledger, view, cfg);
-    if (v <= 0) continue;
-    raw.push({ id: s.id, loc: [s.location[0], s.location[1]], v });
-    if (v > maxValue) maxValue = v;
-  }
-  const features: HeatFeature[] = [];
-  for (const r of raw) {
-    const t = maxValue > 0 ? r.v / maxValue : 0;
+    const t = absoluteValue(s, ledger, view, cfg);
+    if (t > maxValue) maxValue = t;
     if (t < MIN_T) continue;
     features.push({
       type: 'Feature',
-      geometry: { type: 'Point', coordinates: r.loc },
-      properties: { id: r.id, t },
+      geometry: { type: 'Point', coordinates: [s.location[0], s.location[1]] },
+      properties: { id: s.id, t },
     });
   }
   return { type: 'FeatureCollection', features, maxValue };
 }
 
-// Constant real-world footprint: radius doubles per zoom level, so a site keeps
-// a fixed ground size and the field looks the same at every zoom (same method
-// as overlay.ts). Larger + blurred than the demand dots so the even field reads
-// as a continuous surface rather than discrete points.
-const BASE_RADIUS = 14; // px at REF_ZOOM
-const REF_ZOOM = 11;
-const Z_LO = 0;
-const Z_HI = 24;
-const radiusExpr = (): unknown => ([
-  'interpolate', ['exponential', 2], ['zoom'],
-  Z_LO, BASE_RADIUS * 2 ** (Z_LO - REF_ZOOM),
-  Z_HI, BASE_RADIUS * 2 ** (Z_HI - REF_ZOOM),
-]);
+/**
+ * Constant PIXEL radius: circles do not resize with zoom, so their overlap (and
+ * any color stacking it could cause) never changes as you zoom. Fully opaque +
+ * no blur means overlapping marks occlude rather than blend — color is exactly
+ * the site's value, never a hotter mix.
+ */
+const RADIUS_PX = 6;
 
 /** Register source + (hidden) field circle layer. Idempotent via the API's upsert. */
 export function registerHeatmap(api: ModdingAPI): void {
@@ -103,11 +93,11 @@ export function registerHeatmap(api: ModdingAPI): void {
     source: HEAT_SOURCE_ID,
     layout: { visibility: 'none' },
     paint: {
-      'circle-radius': radiusExpr(),
-      // Color encodes the citywide-normalized value; identical at every zoom.
+      'circle-radius': RADIUS_PX,
+      // Color encodes the absolute value; identical at every zoom, no stacking.
       'circle-color': ['interpolate', ['linear'], ['get', 't'], 0, RAMP_LOW, 0.5, RAMP_MID, 1, RAMP_HIGH],
-      'circle-blur': 0.8,
-      'circle-opacity': 0.55,
+      'circle-blur': 0,
+      'circle-opacity': 1,
     },
   });
 }

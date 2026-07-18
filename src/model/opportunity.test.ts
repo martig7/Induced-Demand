@@ -84,3 +84,42 @@ test('accessAt: out of catchment → zero', () => {
   const opps = computeOpportunities(g, stationMasses([A, B], pts, cfg), cfg);
   assert.deepEqual(accessAt([2, 2], opps, cfg), { res: 0, com: 0 });
 });
+
+// --- access index equivalence ------------------------------------------------
+
+import { buildAccessIndex } from './opportunity';
+
+test('accessIndex: float-identical to brute-force accessAt across scattered locations', () => {
+  // Mid-latitude fixture (~lat 40) exercises the cos-scaled keying: many
+  // stations spread wider than one catchment, queries scattered around them.
+  const stations: Station[] = [];
+  const opps = [] as ReturnType<typeof computeOpportunities>;
+  let s = 7;
+  const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+  for (let i = 0; i < 40; i++) {
+    const lon = -74 + rnd() * 0.3;
+    const lat = 40 + rnd() * 0.3;
+    opps.push({ stationId: `s${i}`, coords: [lon, lat], oJobs: rnd(), oRes: rnd() });
+  }
+  void stations;
+  const idx = buildAccessIndex(opps, cfg);
+  for (let q = 0; q < 400; q++) {
+    const loc: [number, number] = [-74 + rnd() * 0.3, 40 + rnd() * 0.3];
+    assert.deepEqual(idx.at(loc), accessAt(loc, opps, cfg), `query ${q} @ ${loc}`);
+  }
+});
+
+test('accessIndex: station just inside the catchment radius in an adjacent cell is found', () => {
+  const radiusM = cfg.CATCHMENT_SECONDS * cfg.WALK_SPEED;
+  // Place a station ~99% of the radius due EAST of the query, at lat 40 where
+  // unscaled lon keying used to shrink cells and miss exactly this neighbor.
+  const lat = 40;
+  const degPerMeterLon = 1 / (111194.9 * Math.cos((lat * Math.PI) / 180));
+  const stationLon = 0.99 * radiusM * degPerMeterLon;
+  const opps = [{ stationId: 'edge', coords: [stationLon, lat] as [number, number], oJobs: 1, oRes: 1 }];
+  const idx = buildAccessIndex(opps, cfg);
+  const got = idx.at([0, lat]);
+  const want = accessAt([0, lat], opps, cfg);
+  assert.deepEqual(got, want);
+  assert.ok(got.res > 0, 'edge station must be visible through the index');
+});

@@ -41,7 +41,22 @@ export interface BuildSitesOpts {
   cfg?: InducedDemandConfig;
 }
 
-export function buildSites(opts: BuildSitesOpts): Site[] {
+/**
+ * Incremental site builder so the chunked Tier 1 rebuild can time-box the
+ * sampling loop across event-loop turns. `step()` samples ONE station's
+ * catchment; iteration order (natives first, then routed stations oldest
+ * first) is fixed, so any chunking schedule yields identical sites.
+ */
+export interface SiteBuilder {
+  /** Number of routed stations that will be sampled. */
+  readonly stationCount: number;
+  /** Sample the next station's catchment. Returns false when exhausted. */
+  step(): boolean;
+  /** The accumulated sites (natives + candidates so far). */
+  finish(): Site[];
+}
+
+export function createSiteBuilder(opts: BuildSitesOpts): SiteBuilder {
   const cfg = opts.cfg ?? DEFAULT_CONFIG;
   const { dd, deps } = opts;
   const sites: Site[] = [];
@@ -75,27 +90,40 @@ export function buildSites(opts: BuildSitesOpts): Site[] {
   const routed = opts.stations
     .filter((s) => (s.routeIds?.length ?? 0) > 0)
     .sort((a, b) => a.createdAt - b.createdAt);
-  for (const st of routed) {
-    const samples = sampleCatchmentSites({
-      seedKey: `${opts.seedPrefix}:${st.id}`,
-      center: st.coords,
-      radiusM: opts.catchmentM,
-      blockers,
-      spacingAt: deps.spacingAt,
-      reject: (c) => {
-        if (deps.isWater(c)) return true;
-        const a = deps.accessAt(c);
-        return Math.max(a.res, a.com) < cfg.MIN_SITE_ACCESS;
-      },
-      softFactor: 1 - cfg.J_FRAC,
-    });
-    for (const s of samples) {
-      if (takenSiteIds.has(s.id)) continue; // materialized already occupies this slot
-      const a = deps.accessAt(s.location);
-      sites.push({ id: s.id, pointId: null, location: s.location, accessRes: a.res, accessCom: a.com });
-    }
-  }
-  return sites;
+  let next = 0;
+  return {
+    stationCount: routed.length,
+    step(): boolean {
+      if (next >= routed.length) return false;
+      const st = routed[next++];
+      const samples = sampleCatchmentSites({
+        seedKey: `${opts.seedPrefix}:${st.id}`,
+        center: st.coords,
+        radiusM: opts.catchmentM,
+        blockers,
+        spacingAt: deps.spacingAt,
+        reject: (c) => {
+          if (deps.isWater(c)) return true;
+          const a = deps.accessAt(c);
+          return Math.max(a.res, a.com) < cfg.MIN_SITE_ACCESS;
+        },
+        softFactor: 1 - cfg.J_FRAC,
+      });
+      for (const s of samples) {
+        if (takenSiteIds.has(s.id)) continue; // materialized already occupies this slot
+        const a = deps.accessAt(s.location);
+        sites.push({ id: s.id, pointId: null, location: s.location, accessRes: a.res, accessCom: a.com });
+      }
+      return true;
+    },
+    finish: () => sites,
+  };
+}
+
+export function buildSites(opts: BuildSitesOpts): Site[] {
+  const builder = createSiteBuilder(opts);
+  while (builder.step()) { /* run to completion */ }
+  return builder.finish();
 }
 
 /** Tier 2 refresh: recompute cached access on every site (topology unchanged). */
@@ -119,6 +147,32 @@ export function computeStructuralHash(routes: Route[]): string {
   return routes
     .filter((r) => r.tempParentId == null)
     .map((r) => `${r.id}:${(r.stations ?? []).map((s) => s.id).join(',')}`)
+    .sort()
+    .join('|');
+}
+
+/**
+ * Service-level hash (Tier 2 pruning): everything the graph WEIGHTS depend on —
+ * schedules, timetable headways, timings — but not demand masses (those drift
+ * daily with growth; the caller tracks drift separately and refreshes on a
+ * threshold). Unchanged hash ⇒ the day-end weight refresh can be skipped.
+ */
+export function computeServiceHash(routes: Route[]): string {
+  return routes
+    .filter((r) => r.tempParentId == null)
+    .map((r) => {
+      const ts = r.trainSchedule;
+      const tt = r.timetableSchedule;
+      const timings = r.stComboTimings ?? [];
+      return [
+        r.id,
+        ts ? `${ts.highDemand},${ts.mediumDemand},${ts.lowDemand},${ts.veryLowDemand ?? ''}` : '',
+        r.idealTrainCount ?? '',
+        tt?.mode === 'timetable' ? (tt.periods ?? []).map((p) => p.headwaySeconds).join(',') : '',
+        timings.length,
+        timings.length > 0 ? timings[timings.length - 1].arrivalTime : 0,
+      ].join(':');
+    })
     .sort()
     .join('|');
 }

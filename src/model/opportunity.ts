@@ -59,6 +59,26 @@ export function dijkstraStreetTimes(g: StationGraph, sourceStreet: number): Floa
 
 export interface StationMass { res: number; jobs: number }
 
+/**
+ * Degree-scaled grid keying for radius searches. Longitude degrees shrink by
+ * cos(lat), so an unscaled lon key makes cells NARROWER (in meters) than the
+ * search radius away from the equator, and a 3×3 ring can miss east/west
+ * neighbors near the radius edge. Keys are cos-scaled at a fixed reference
+ * latitude, and the cell gets a 5% margin so "the ring covers the radius"
+ * holds across a city's own cos(lat) variation.
+ */
+function radiusGridKeyer(
+  radiusM: number,
+  refLat: number,
+): (lon: number, lat: number) => { cx: number; cy: number } {
+  const cell = radiusM * 1.05;
+  const mPerLon = 111320 * Math.max(0.2, Math.cos((refLat * Math.PI) / 180));
+  return (lon: number, lat: number) => ({
+    cx: Math.floor((lon * mPerLon) / cell),
+    cy: Math.floor((lat * 110540) / cell),
+  });
+}
+
 /** Residents/jobs mass within each station's walk catchment (grid-indexed). */
 export function stationMasses(
   stations: Station[],
@@ -66,21 +86,18 @@ export function stationMasses(
   cfg: InducedDemandConfig,
 ): Map<string, StationMass> {
   const radiusM = cfg.CATCHMENT_SECONDS * cfg.WALK_SPEED;
-  const cell = radiusM; // 1-cell ring covers the radius
+  const cellOf = radiusGridKeyer(radiusM, stations[0]?.coords[1] ?? 0);
   const grid = new Map<string, DemandPoint[]>();
-  const keyOf = (lon: number, lat: number): string =>
-    `${Math.floor((lon * 111320) / cell)},${Math.floor((lat * 110540) / cell)}`;
   for (const p of points) {
-    const k = keyOf(p.location[0], p.location[1]);
+    const { cx, cy } = cellOf(p.location[0], p.location[1]);
+    const k = `${cx},${cy}`;
     const bucket = grid.get(k);
     if (bucket) bucket.push(p); else grid.set(k, [p]);
   }
   const out = new Map<string, StationMass>();
   for (const st of stations) {
     let res = 0, jobs = 0;
-    const [lon, lat] = st.coords;
-    const cx = Math.floor((lon * 111320) / cell);
-    const cy = Math.floor((lat * 110540) / cell);
+    const { cx, cy } = cellOf(st.coords[0], st.coords[1]);
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
         for (const p of grid.get(`${cx + dx},${cy + dy}`) ?? []) {
@@ -142,6 +159,15 @@ export function accessAt(
   opps: StationOpportunity[],
   cfg: InducedDemandConfig,
 ): DirectionalAccess {
+  return accessOver(loc, opps, cfg);
+}
+
+/** Shared scorer: only the stations handed in are considered. */
+function accessOver(
+  loc: Coordinate,
+  opps: Iterable<StationOpportunity>,
+  cfg: InducedDemandConfig,
+): DirectionalAccess {
   let res = 0, com = 0;
   const floor = cfg.ACCESS_CONN_FLOOR;
   for (const o of opps) {
@@ -154,4 +180,45 @@ export function accessAt(
     if (c > com) com = c;
   }
   return { res, com };
+}
+
+/**
+ * Station-proximity index for access lookups. `accessAt` is O(stations) per
+ * call, which multiplied across every sampler attempt of a 10k-site field
+ * rebuild — the second-largest cost in the measured 161 s tier1. Stations are
+ * gridded at catchment-radius cells, so `at()` scans only the 3×3 ring: any
+ * station within the catchment radius is inside that ring, and stations
+ * outside contribute nothing to `accessOver` anyway — results are identical
+ * to the brute-force scan, float for float.
+ */
+export interface AccessIndex {
+  at(loc: Coordinate): DirectionalAccess;
+}
+
+export function buildAccessIndex(
+  opps: StationOpportunity[],
+  cfg: InducedDemandConfig,
+): AccessIndex {
+  const radiusM = cfg.CATCHMENT_SECONDS * cfg.WALK_SPEED;
+  const cellOf = radiusGridKeyer(radiusM, opps[0]?.coords[1] ?? 0);
+  const grid = new Map<string, StationOpportunity[]>();
+  for (const o of opps) {
+    const { cx, cy } = cellOf(o.coords[0], o.coords[1]);
+    const k = `${cx},${cy}`;
+    const bucket = grid.get(k);
+    if (bucket) bucket.push(o); else grid.set(k, [o]);
+  }
+  return {
+    at(loc: Coordinate): DirectionalAccess {
+      const { cx, cy } = cellOf(loc[0], loc[1]);
+      const nearby: StationOpportunity[] = [];
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          const bucket = grid.get(`${cx + dx},${cy + dy}`);
+          if (bucket) nearby.push(...bucket);
+        }
+      }
+      return accessOver(loc, nearby, cfg);
+    },
+  };
 }

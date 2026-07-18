@@ -41,11 +41,15 @@ import { createHistoryPanel } from './ui/historyPanel';
 import { TOOLBAR_PANEL_ID, TOOLBAR_PLACEMENT } from './ui/toolbarPanel';
 import { buildStationGraph, type StationGraph } from './model/stationGraph';
 import {
-  stationMasses, computeOpportunities, accessAt, type StationOpportunity,
+  stationMasses, computeOpportunities, buildAccessIndex,
+  type StationOpportunity, type AccessIndex,
 } from './model/opportunity';
 import { fitDensity, spacingAt, massAt, type DensityFit, type FitInputPoint } from './model/densityFit';
 import { jitterPosition } from './model/sampler';
-import { buildSites, refreshSiteAccess, computeStructuralHash, type Site } from './model/field';
+import {
+  createSiteBuilder, refreshSiteAccess, computeStructuralHash, computeServiceHash,
+  type Site, type BuildSitesOpts,
+} from './model/field';
 import { buildWaterIndex, type WaterIndex, type OceanDepthFile } from './game/waterIndex';
 import { recreateMaterializedPoints } from './model/ledger';
 import { createPerfTracker, PERF_BUDGETS } from './model/perf';
@@ -136,8 +140,14 @@ if (!api) {
       sites: Site[];
       graph: StationGraph;
       opps: StationOpportunity[];
+      /** Station-proximity access lookups — O(nearby), float-identical to accessAt. */
+      accessIdx: AccessIndex;
       fit: DensityFit;
       hash: string;
+      /** Weight inputs (schedules/timings) at the last opportunity compute. */
+      serviceHash: string;
+      /** People added/removed since the last opportunity compute (drift refresh). */
+      massDrift: number;
       water: WaterIndex | null;
       waterFailed: boolean;
     };
@@ -281,16 +291,80 @@ if (!api) {
     return api.gameState.getRoutes({ includeTempRoutes: false });
   }
 
+  /** Graph + opportunities + access index — the weight layer both tiers share. */
+  function computeWeights(dd: DemandData): {
+    routes: ReturnType<typeof liveRoutes>;
+    stations: Station[];
+    graph: StationGraph;
+    opps: StationOpportunity[];
+    accessIdx: AccessIndex;
+    hash: string;
+    serviceHash: string;
+  } {
+    const routes = liveRoutes();
+    const stations = inductionStations();
+    const groups = api.gameState.getStationGroups?.() ?? [];
+    const graph = buildStationGraph(routes, stations, groups, DEFAULT_CONFIG);
+    const opps = computeOpportunities(graph, stationMasses(stations, dd.points.values(), DEFAULT_CONFIG), DEFAULT_CONFIG);
+    return {
+      routes, stations, graph, opps,
+      accessIdx: buildAccessIndex(opps, DEFAULT_CONFIG),
+      hash: computeStructuralHash(routes),
+      serviceHash: computeServiceHash(routes),
+    };
+  }
+
+  /** Fit + site-builder options for a rebuild, given fresh weights. */
+  function prepareBuild(
+    dd: DemandData,
+    accessIdx: AccessIndex,
+    stations: Station[],
+    water: WaterIndex | null,
+    city: string,
+  ): { fit: DensityFit; buildOpts: BuildSitesOpts } {
+    const fitInput: FitInputPoint[] = [...dd.points.values()].map((p) => {
+      const a = accessIdx.at(p.location);
+      return { location: p.location, residents: p.residents, jobs: p.jobs, access: Math.max(a.res, a.com) };
+    });
+    const fit = fitDensity(fitInput, DEFAULT_CONFIG);
+    return {
+      fit,
+      buildOpts: {
+        dd,
+        stations,
+        materialized: ledger.materialized ?? {},
+        catchmentM: DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED,
+        deps: {
+          spacingAt: (c) => {
+            const a = accessIdx.at(c);
+            return spacingAt(fit, Math.max(a.res, a.com));
+          },
+          accessAt: (c) => accessIdx.at(c),
+          isWater: (c) => water?.isWater(c) ?? false,
+        },
+        seedPrefix: city,
+        cfg: DEFAULT_CONFIG,
+      },
+    };
+  }
+
+  /** Increments to cancel an in-flight chunked rebuild (newer build/city/generation wins). */
+  let fieldBuildGen = 0;
+
   /**
-   * Tier 1 — full structural rebuild (spec §8): graph, opportunities, density
-   * fit, candidate sampling, heatmap. Runs at init, debounced on route
-   * created/deleted, and when the day-end structural hash mismatches.
+   * Tier 1 — full structural rebuild (spec §8), CHUNKED: the sampling loop is
+   * time-boxed (~12 ms per slice) and yields to the event loop between slices,
+   * so a 10k-site rebuild never blocks a frame (the synchronous version was
+   * measured at 161 s in-game). The field snapshot is swapped only on
+   * completion — consumers always see a complete, consistent field. Runs at
+   * init and debounced on route created/deleted.
    */
   async function rebuildField(): Promise<void> {
     const city = key();
     if (city === 'unknown') return;
-    const dd = api.gameState.getDemandData();
+    let dd = api.gameState.getDemandData();
     if (!dd) return;
+    const gen = ++fieldBuildGen;
     const session = ensureSession();
     let water = session.field?.city === city ? session.field.water : null;
     let waterFailed = session.field?.city === city ? session.field.waterFailed : false;
@@ -298,60 +372,114 @@ if (!api) {
       water = await loadWaterIndex(city);
       waterFailed = water === null;
     }
-    perf.track('tier1', PERF_BUDGETS.tier1, () => {
-      const routes = liveRoutes();
-      const stations = inductionStations();
-      const groups = api.gameState.getStationGroups?.() ?? [];
-      const graph = buildStationGraph(routes, stations, groups, DEFAULT_CONFIG);
-      const opps = computeOpportunities(graph, stationMasses(stations, dd.points.values(), DEFAULT_CONFIG), DEFAULT_CONFIG);
-      const acc = (c: Coordinate) => accessAt(c, opps, DEFAULT_CONFIG);
-      const fitInput: FitInputPoint[] = [...dd.points.values()].map((p) => {
-        const a = acc(p.location);
-        return { location: p.location, residents: p.residents, jobs: p.jobs, access: Math.max(a.res, a.com) };
-      });
-      const fit = fitDensity(fitInput, DEFAULT_CONFIG);
-      const isWater = (c: Coordinate): boolean => water?.isWater(c) ?? false;
-      const sites = buildSites({
-        dd,
-        stations,
-        materialized: ledger.materialized ?? {},
-        catchmentM: DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED,
-        deps: {
-          spacingAt: (c) => spacingAt(fit, Math.max(acc(c).res, acc(c).com)),
-          accessAt: acc,
-          isWater,
-        },
-        seedPrefix: city,
-        cfg: DEFAULT_CONFIG,
-      });
-      session.field = {
-        city, sites, graph, opps, fit, hash: computeStructuralHash(routes), water, waterFailed,
-      };
-      return sites;
-    }, (sites) => `${sites.length} sites`);
+    const stale = (): boolean => gen !== fieldBuildGen || !isCurrent() || key() !== city;
+    if (stale()) return;
+    const yieldToLoop = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+    const t0 = performance.now();
+
+    // Phase A: weights (ms-scale, synchronous).
+    dd = api.gameState.getDemandData();
+    if (!dd) return;
+    const weights = computeWeights(dd);
+    await yieldToLoop();
+    if (stale()) return;
+
+    // Phase B: density fit (ms-scale).
+    const { fit, buildOpts } = prepareBuild(dd, weights.accessIdx, weights.stations, water, city);
+    const builder = createSiteBuilder(buildOpts);
+    await yieldToLoop();
+    if (stale()) return;
+
+    // Phase C: sampling, time-boxed slices.
+    let chunks = 0;
+    let maxChunkMs = 0;
+    for (;;) {
+      const chunkStart = performance.now();
+      let more = true;
+      while (more && performance.now() - chunkStart < 12) more = builder.step();
+      chunks++;
+      maxChunkMs = Math.max(maxChunkMs, performance.now() - chunkStart);
+      if (!more) break;
+      await yieldToLoop();
+      if (stale()) return;
+    }
+
+    const sites = builder.finish();
+    session.field = {
+      city, sites,
+      graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,
+      fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
+      water, waterFailed,
+    };
+    const total = performance.now() - t0;
+    perf.record('tier1', PERF_BUDGETS.tier1Total, total,
+      `${sites.length} sites, ${chunks} chunks, max ${maxChunkMs.toFixed(1)}ms`);
+    if (maxChunkMs > PERF_BUDGETS.tier1Chunk) {
+      console.warn(`${TAG} tier1 chunk over budget: ${maxChunkMs.toFixed(1)}ms > ${PERF_BUDGETS.tier1Chunk}ms`);
+    }
     refreshHeatmap();
   }
 
   /**
-   * Tier 2 — day-end weight refresh (spec §8): re-derive schedule weights +
-   * opportunities from getRoutes() (never getTrains()), refresh cached site
-   * access. Promotes to Tier 1 when the structural hash changed (route edits
-   * fire NO hook — this is the primary edit detector).
+   * Synchronous Tier 1, only for the day-end structural-hash promotion: growth
+   * must not run on a stale structure, and post-optimization the full rebuild
+   * is a small, rare hitch (unhooked route edits only — route hooks already
+   * fire the chunked path).
    */
-  async function refreshFieldWeights(): Promise<void> {
+  function rebuildFieldSync(dd: DemandData, city: string, water: WaterIndex | null, waterFailed: boolean): void {
+    fieldBuildGen++; // cancel any in-flight chunked build; this snapshot is newer
+    perf.track('tier1', PERF_BUDGETS.tier1, () => {
+      const weights = computeWeights(dd);
+      const { fit, buildOpts } = prepareBuild(dd, weights.accessIdx, weights.stations, water, city);
+      const builder = createSiteBuilder(buildOpts);
+      while (builder.step()) { /* run to completion */ }
+      const sites = builder.finish();
+      ensureSession().field = {
+        city, sites,
+        graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,
+        fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
+        water, waterFailed,
+      };
+      return sites;
+    }, (sites) => `${sites.length} sites (sync promotion)`);
+    refreshHeatmap();
+  }
+
+  /** Mass drift beyond this fraction of city demand triggers a weight refresh. */
+  const MASS_DRIFT_REFRESH = 0.02;
+
+  /**
+   * Tier 2 — day-end weight refresh (spec §8), PRUNED: skipped entirely when
+   * neither the service inputs (schedules/timings) nor accumulated demand
+   * drift changed. Promotes to a synchronous Tier 1 when the structural hash
+   * changed (route edits fire NO hook — this is the primary edit detector).
+   */
+  function refreshFieldWeights(dd: DemandData): void {
     const session = ensureSession();
     const f = session.field;
     const city = key();
-    const dd = api.gameState.getDemandData();
-    if (!f || f.city !== city || !dd) { await rebuildField(); return; }
+    if (!f || f.city !== city) {
+      // No usable field: growth skips this day; the chunked rebuild fills it.
+      void rebuildField();
+      return;
+    }
     const routes = liveRoutes();
-    if (computeStructuralHash(routes) !== f.hash) { await rebuildField(); return; }
+    if (computeStructuralHash(routes) !== f.hash) {
+      rebuildFieldSync(dd, city, f.water, f.waterFailed);
+      return;
+    }
+    let totalMass = 0;
+    for (const p of dd.points.values()) totalMass += p.residents + p.jobs;
+    const drifted = f.massDrift > MASS_DRIFT_REFRESH * Math.max(1, totalMass);
+    if (computeServiceHash(routes) === f.serviceHash && !drifted) return; // steady state: skip
     perf.track('tier2', PERF_BUDGETS.tier2, () => {
-      const stations = inductionStations();
-      const groups = api.gameState.getStationGroups?.() ?? [];
-      f.graph = buildStationGraph(routes, stations, groups, DEFAULT_CONFIG);
-      f.opps = computeOpportunities(f.graph, stationMasses(stations, dd.points.values(), DEFAULT_CONFIG), DEFAULT_CONFIG);
-      refreshSiteAccess(f.sites, (c) => accessAt(c, f.opps, DEFAULT_CONFIG));
+      const weights = computeWeights(dd);
+      f.graph = weights.graph;
+      f.opps = weights.opps;
+      f.accessIdx = weights.accessIdx;
+      f.serviceHash = weights.serviceHash;
+      f.massDrift = 0;
+      refreshSiteAccess(f.sites, (c) => weights.accessIdx.at(c));
     });
   }
 
@@ -622,7 +750,7 @@ if (!api) {
       dd,
       (p) => {
         if (!fieldForOverlay || fieldForOverlay.city !== key()) return { res: 0, com: 0 };
-        return accessAt(p.location, fieldForOverlay.opps, DEFAULT_CONFIG);
+        return fieldForOverlay.accessIdx.at(p.location);
       },
       s.view, s.metric, DEFAULT_CONFIG,
     );
@@ -998,7 +1126,7 @@ if (!api) {
     }
     // Tier 2 (or hash-promoted Tier 1) BEFORE growth — no growth day on stale weights.
     try {
-      await refreshFieldWeights();
+      refreshFieldWeights(dd);
     } catch (e) {
       console.error(`${TAG} field refresh failed`, e);
     }
@@ -1010,7 +1138,7 @@ if (!api) {
           if (field.water?.isWater(c)) return true;
           // Soft spacing vs every existing point (few k points × ≤ ~17 checks/day).
           // Access (→ spacing) computed ONCE per candidate position, not per point.
-          const a = accessAt(c, field.opps, DEFAULT_CONFIG);
+          const a = field.accessIdx.at(c);
           const softR = (1 - DEFAULT_CONFIG.J_FRAC) * spacingAt(field.fit, Math.max(a.res, a.com));
           for (const p of dd.points.values()) {
             if (haversine(c, p.location) < softR) return true;
@@ -1031,6 +1159,9 @@ if (!api) {
       } catch (e) {
         console.error(`${TAG} runDay failed on day ${day}`, e);
       }
+      // Demand-mass drift feeds the Tier 2 refresh threshold (opportunities
+      // track the growing city without a daily recompute).
+      field.massDrift += (result.added + result.removed) * DEFAULT_CONFIG.POP_SIZE * 2;
     } else if (DEBUG) {
       console.log(`${TAG} day ${day}: field not ready — growth skipped this day`);
     }

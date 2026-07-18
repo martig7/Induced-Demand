@@ -41,3 +41,14 @@ test('summary: compact one-liner of last runs', () => {
   perf.track('b', 100, () => 0);
   assert.match(perf.summary(), /a 2\.0ms · b 2\.0ms/);
 });
+
+test('record: externally-measured duration logs, stores, and budgets like track', () => {
+  const logs: string[] = [];
+  const warns: string[] = [];
+  const perf = createPerfTracker((m) => logs.push(m), (m) => warns.push(m), () => 0);
+  perf.record('tier1', 100, 250.5, '3 chunks');
+  assert.equal(perf.last.tier1.ms, 250.5);
+  assert.equal(perf.last.tier1.info, '3 chunks');
+  assert.match(logs[0], /tier1 250\.5ms \(3 chunks\)/);
+  assert.equal(warns.length, 1);
+});

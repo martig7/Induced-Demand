@@ -60,6 +60,24 @@ Re-baseline: keep `tier1: 100` as the *blocking* budget for the synchronous prom
 
 **Result target:** buildSites at 21k synthetic sites from ~30 s → < 500 ms; in-game tier1 at 10.3k sites from 161 s → sub-second total, no blocking chunk > 16 ms.
 
+## Results (measured after implementation, same synthetic bench)
+
+| Phase | Before | After index (T1+2) | After access index (T3) |
+|---|---|---|---|
+| buildSites (21,343 sites) | 29,958 ms | 5,219 ms | **1,229 ms** |
+| fit access (5k pts × 120 st) | 32.4 ms | — | **7.8 ms** |
+| graph + masses + opps | ~12 ms | — | ~13 ms |
+
+Site output identical across all three (21,343 sites; the spacing grid is
+golden-tested byte-identical, the access index float-identical). The remaining
+~1.2 s is sampler attempt volume — chunked at ~12 ms slices in-game, so the
+wall time amortizes invisibly; at the measured in-game scale (10.3k sites)
+total is expected well under a second. Tier 2 steady-state is now two hash
+computations (skip path). Execution notes vs the task list: Tasks 1+2 were
+implemented as one change (the grid IS the shared index; the golden reference
+targets the merged semantics), and the mid-latitude lon-scaling coverage bug
+this exposed in `stationMasses` was fixed with the shared `radiusGridKeyer`.
+
 ---
 
 **Out of scope:** no version bump (user rule); no change to sampling semantics beyond the documented Task 2 blocker-set correction; incremental per-station caching deferred unless the above misses target.

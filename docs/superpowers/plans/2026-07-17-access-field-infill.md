@@ -786,10 +786,12 @@ test('computeOpportunities: A sees jobs through the network, B sees residents', 
   assert.ok(oA.oJobs < oB.oJobs + 1e-9);
 });
 
-test('accessAt: directional — near A, res access (to jobs) beats com access', () => {
+test('accessAt: directional — near job-dense B, residential access (to jobs) dominates', () => {
   const g = buildStationGraph([r1], [A, B], [], cfg);
   const opps = computeOpportunities(g, stationMasses([A, B], pts, cfg), cfg);
-  const acc = accessAt([0.0002, 0], opps, cfg);
+  const acc = accessAt([0.0502, 0], opps, cfg);
+  // B's own jobs are reachable at zero cost (self-inclusion): oJobs_B = 1 > oRes_B,
+  // so a location by B is more attractive for residences than for more jobs.
   assert.ok(acc.res > acc.com, `res ${acc.res} com ${acc.com}`);
   assert.ok(acc.res > 0 && acc.res <= 1);
 });
@@ -2844,3 +2846,4 @@ Expected: everything green; bundle copied to the mods directory.
 - Spec coverage: §1 field (T8), §2 access v2 (T4+T5), §3 fit/creep (T6), §4 sampler/jitter/water (T3+T7), §5 engine (T10), §6 ledger/persistence (T9 + T12 load order), §7 heatmap (T11), §8 tiers/hash (T12), §9 modules (T2–T11), §10 perf+tests (T2 + per-task), §11 config/typings (T1). Relocation (`PHI`) removal is an intentional simplification called out in T10.
 - Type consistency: `Site` defined once in field.ts (T8) and imported by engine (T10), heatmap (T11), main (T12). `RunDayDeps` defined in engine (T10), used in T12. `DirectionalAccess` from opportunity (T5) used by field deps (T8). `DayResult.newPoints` added in T10, consumed in T12.
 - Ordering hazard: T10 Step 5 keeps `main.ts` compiling with a zero-access bridge so every task boundary has a green tree.
+- Task 5 directional test corrected during execution: self-inclusion makes com dominate near a residential station; the assertion now samples near the job-dense station.

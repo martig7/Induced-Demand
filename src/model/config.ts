@@ -11,8 +11,6 @@ export interface InducedDemandConfig {
   R_DECAY: number;
   /** Net-equal reconciliation rule for the daily pop count. */
   RECONCILE: ReconcileRule;
-  /** Relocation fraction (0 = pure additive). */
-  PHI: number;
   /** Max magnitude held in an accumulator (people). */
   ACCUM_CAP: number;
   /** Walk seconds beyond which a station is out of catchment. */
@@ -72,7 +70,6 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   R_GROW: 0.1,
   R_DECAY: 0.04,
   RECONCILE: 'average',
-  PHI: 0,
   ACCUM_CAP: 1000,
   CATCHMENT_SECONDS: 1800,
   TAU_ACCESS: 600,

@@ -629,7 +629,6 @@ if (!api) {
     lastMax = fc.maxValue;
     updateOverlay(api, fc);
     setOverlayVisible(api, true);
-    refreshHeatmap();
   }
   overlayStore.subscribe(refreshOverlay);
 

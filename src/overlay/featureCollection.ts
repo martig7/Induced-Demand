@@ -1,6 +1,5 @@
-import type { DemandData, Station } from '../types/game-state';
+import type { DemandData, DemandPoint } from '../types/game-state';
 import type { InducedDemandConfig } from '../model/config';
-import { access, toAccessStations } from '../model/access';
 import { residentialScore, commercialScore } from '../model/score';
 import { INDUCED_PREFIX } from '../model/popFactory';
 import type { OverlayView, OverlayMetric, OverlayFeature, OverlayFeatureCollection } from './types';
@@ -15,7 +14,7 @@ import type { OverlayView, OverlayMetric, OverlayFeature, OverlayFeatureCollecti
  */
 export function buildOverlay(
   dd: DemandData,
-  stations: Station[],
+  accessOf: (p: DemandPoint) => { res: number; com: number },
   view: OverlayView,
   metric: OverlayMetric,
   cfg: InducedDemandConfig,
@@ -30,7 +29,6 @@ export function buildOverlay(
     }
   }
 
-  const accessStations = toAccessStations(stations);
   const features: OverlayFeature[] = [];
   let maxValue = 0;
 
@@ -41,9 +39,9 @@ export function buildOverlay(
       const j = indJob[p.id] ?? 0;
       value = metric === 'residential' ? r : metric === 'commercial' ? j : r + j;
     } else {
-      const a = access(p.location, accessStations, cfg);
-      const sRes = residentialScore(p, a);
-      const sJob = commercialScore(p, a);
+      const a = accessOf(p);
+      const sRes = residentialScore(p, a.res);
+      const sJob = commercialScore(p, a.com);
       value = metric === 'residential' ? sRes : metric === 'commercial' ? sJob : sRes + sJob;
     }
     if (value > 0) {

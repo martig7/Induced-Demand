@@ -19,8 +19,6 @@ export interface InducedDemandConfig {
   CATCHMENT_SECONDS: number;
   /** Gaussian walk-time decay scale for access. */
   TAU_ACCESS: number;
-  /** Distinct lines in catchment for full connectivity credit. */
-  CONNECTIVITY_REF: number;
   /** Minimum access credit for a single-line point. */
   ACCESS_CONN_FLOOR: number;
   /** Walking speed (m/s) for access walk-time. */
@@ -78,7 +76,6 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   ACCUM_CAP: 1000,
   CATCHMENT_SECONDS: 1800,
   TAU_ACCESS: 600,
-  CONNECTIVITY_REF: 3,
   ACCESS_CONN_FLOOR: 0.5,
   WALK_SPEED: 1.0,
   BETA: 2.0,

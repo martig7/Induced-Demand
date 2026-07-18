@@ -468,7 +468,8 @@ if (!api) {
     if (!s.enabled) { setOverlayVisible(api, false); return; }
     const dd = api.gameState.getDemandData();
     if (!dd) return;
-    const fc = buildOverlay(dd, inductionStations(), s.view, s.metric, DEFAULT_CONFIG);
+    // TEMPORARY bridge (Task 10): zero access ⇒ empty targeting view. Task 12 wires the real field.
+    const fc = buildOverlay(dd, () => ({ res: 0, com: 0 }), s.view, s.metric, DEFAULT_CONFIG);
     lastMax = fc.maxValue;
     updateOverlay(api, fc);
     setOverlayVisible(api, true);
@@ -827,11 +828,19 @@ if (!api) {
     } catch (e) {
       console.error(`${TAG} reconcile failed`, e);
     }
-    let result: DayResult = { added: 0, removed: 0, deltas: {} };
+    let result: DayResult = { added: 0, removed: 0, newPoints: 0, deltas: {} };
     try {
+      // TEMPORARY bridge (Task 10): behavior-neutral placeholders — zero-access sites and
+      // zero fit deps produce NO growth. Task 12 replaces this with the real site field.
       result = runDay(
-        dd, stations, ledger, DEFAULT_CONFIG,
-        makeRng(hashSeed(currentCity(), day)), liveSlotSet(), drivingModel(),
+        dd,
+        [...dd.points.values()].map((p) => ({
+          id: p.id, pointId: p.id, location: p.location, accessRes: 0, accessCom: 0,
+        })),
+        ledger, DEFAULT_CONFIG,
+        makeRng(hashSeed(currentCity(), day)),
+        { massAt: () => 0, spacingAt: () => DEFAULT_CONFIG.R_MAX, jitter: (_i, n) => n },
+        liveSlotSet(), drivingModel(),
       );
     } catch (e) {
       console.error(`${TAG} runDay failed on day ${day}`, e);

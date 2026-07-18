@@ -756,6 +756,11 @@ if (!api) {
   }
 
   function refreshOverlay(): void {
+    // The overlay store is persisted on `window`, so a previous generation's
+    // subscription survives a mod reload and would keep running THIS closure's
+    // (now-stale) code — including the old synchronous heatmap path. Only the
+    // current generation should react.
+    if (!isCurrent()) return;
     // Heatmap first, unconditionally: heatView is independent of the circle
     // overlay's enabled/historyDay state, and refreshHeatmap self-guards.
     refreshHeatmap();

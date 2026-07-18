@@ -20,6 +20,7 @@ export function createPanel(
   // Rendered inline below the History button when `historyOpen` (the game's
   // addFloatingPanel only adds a collapsed top-bar icon — see docs/MODDING_UI.md).
   HistorySection: (() => unknown) | null = null,
+  getPerf: () => string = () => '',
 ): () => unknown {
   const React = api.utils.React as unknown as {
     createElement: (type: unknown, props?: unknown, ...children: unknown[]) => unknown;
@@ -109,9 +110,16 @@ export function createPanel(
         seg('Com', s.metric === 'commercial', () => setMetric('commercial')),
         seg('Both', s.metric === 'combined', () => setMetric('combined')),
       ]),
+      row('Field', [
+        seg('Off', (s.heatView ?? 'off') === 'off', () => store.set({ heatView: 'off' })),
+        seg('Res', s.heatView === 'accessRes', () => store.set({ heatView: 'accessRes' })),
+        seg('Com', s.heatView === 'accessCom', () => store.set({ heatView: 'accessCom' })),
+        seg('Pres', s.heatView === 'pressure', () => store.set({ heatView: 'pressure' })),
+      ]),
       legend,
       historyBtn,
       ...(historySection ? [historySection] : []),
+      h('div', { style: { fontSize: '10px', opacity: 0.6, marginTop: '6px' } }, getPerf() || ' '),
       resetBtn);
   };
 }

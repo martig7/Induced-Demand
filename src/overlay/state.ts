@@ -14,6 +14,8 @@ export interface OverlayState {
   historyDay?: number | null;
   /** Inline history section expanded in the toolbar panel. */
   historyOpen?: boolean;
+  /** Field heatmap view; 'off' hides the layer. */
+  heatView?: 'off' | 'accessRes' | 'accessCom' | 'pressure';
 }
 
 export interface OverlayStore {

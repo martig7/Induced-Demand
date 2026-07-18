@@ -24,7 +24,7 @@ export interface MapSource {
 /** Configuration for a MapLibre layer. */
 export interface MapLayer {
   id: string;
-  type: 'fill' | 'line' | 'symbol' | 'circle' | 'raster' | 'fill-extrusion';
+  type: 'fill' | 'line' | 'symbol' | 'circle' | 'raster' | 'fill-extrusion' | 'heatmap';
   /** ID of the source to use for this layer. */
   source: string;
   /** Source layer name (required for vector tile sources). */

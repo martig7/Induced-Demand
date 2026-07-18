@@ -36,15 +36,27 @@ Realism requirements from the user:
    lakes/rivers, not just ocean). O(1) water test: grid cell lookup →
    point-in-polygon against that cell's few polygons. Loads via the data server
    (`loadCityJson`, gz sibling), ~2.4 MB parsed, once per city.
-4. **Real station-graph weights exist in the API**: `Route.stComboTimings`
-   (per-stNode arrival/departure → ride times incl. dwell),
-   `Station.nearbyStations` (`{stationId, walkingTime}` — the game's own
-   transfer basis), `getStationGroups()`/`getSiblingStationIds()`
-   (interchanges), `Route.trainSchedule` + `idealTrainCount` (peak scheduled
-   service → headway = cycle time ÷ peak trains, expected wait ≈ headway/2;
-   cycle time from last timing arrival). Live `getTrains()` is deliberately
-   unused — it samples the current demand period, not scheduled service.
-5. **Existing invariants carry over**: every pop in `popsMap` must reference
+4. **Real station-graph weights exist in the API** (all decompile-verified):
+   `Route.stComboTimings` (per-stNode arrival/departure → ride times incl.
+   dwell), `Station.nearbyStations` (`{stationId, walkingTime}` — the game's
+   own transfer basis), `getStationGroups()`/`getSiblingStationIds()`
+   (interchanges). **Service level**: `trainSchedule.{highDemand, mediumDemand,
+   lowDemand, veryLowDemand?}` are **train counts** (the game maxes them for
+   fleet math). Routes may instead use `timetableSchedule.mode === 'timetable'`
+   with `periods[].headwaySeconds` — read peak headway directly (min across
+   periods). The game's own helpers mirror our formulas: `getRouteCycleTime` =
+   last `stComboTimings` arrival (fallback `RULES.TRAIN_SCHEDULE_TRANSITION_WINDOW`),
+   `computeTrainCountFromHeadway` = `floor(cycle/headway)`. Live `getTrains()`
+   is deliberately unused — it samples the current demand period, not
+   scheduled service. (`timetableSchedule` is missing from our `Route` typings
+   — add as optional.)
+5. **Hook coverage for route changes** (decompile-verified):
+   `triggerRouteCreated` fires only from `generateRoute` (new routes),
+   `triggerRouteDeleted` only from `deleteRoute`. The temp-route commit path
+   (`tempParentId`) fires **no hook** — route edits are invisible to events.
+   The Tier 2 day-end structural hash is therefore the *primary* edit
+   detector, not a safety net; Tier 1 hooks are a UX optimization.
+6. **Existing invariants carry over**: every pop in `popsMap` must reference
    live points (commute-worker throws otherwise); retired pops are size-0
    tombstone stubs, never deleted; `loadGuard` classifies real loads.
 
@@ -78,14 +90,16 @@ Replaces the line-count connectivity term (`CONNECTIVITY_REF` retires).
 - **Station graph** (rebuilt on network change only): ride edges from
   `stComboTimings`; transfer edges from `nearbyStations` walk times;
   interchange edges (≈free) from station groups/siblings; per-route boarding
-  wait from **route-intrinsic data only** — cycle time (last `stComboTimings`
-  arrival) ÷ peak scheduled trains (`trainSchedule.highDemand`,
-  `idealTrainCount` fallback), halved. Peak service is the right basis: commute
-  departures cluster in the 7–10/16–19 peaks that run high-demand service.
-  Never read `getTrains()` — live counts sample whichever demand period is
-  currently running (overnight reads would price access off low service).
-  Fallback if timings are missing on a route: distance ÷ nominal transit
-  speed, same structure.
+  wait from **route-intrinsic data only**, per scheduling mode (verified §facts 4):
+  timetable routes (`timetableSchedule.mode === 'timetable'`) → peak headway =
+  min `periods[].headwaySeconds`; legacy routes → headway = cycle time (last
+  `stComboTimings` arrival) ÷ max of the `trainSchedule` counts
+  (`idealTrainCount` fallback). Expected wait = headway/2. Peak service is the
+  right basis: commute departures cluster in the 7–10/16–19 peaks that run
+  high-demand service. Never read `getTrains()` — live counts sample whichever
+  demand period is currently running (overnight reads would price access off
+  low service). Fallback if timings are missing on a route: distance ÷ nominal
+  transit speed, same structure.
 - **Opportunity per station** (Dijkstra per station, network change only):
   `O_jobs(s) = Σ_s' jobsMass(s')·exp(−t(s,s')/TAU_REACH)` and likewise
   `O_res(s)` with residents mass. `mass(s')` = residents/jobs within s'
@@ -206,10 +220,13 @@ gestures; never chase train events):
   adding trains updates a route's schedule without firing any route hook.
   Side benefit: demand-mass sums refresh daily, so opportunity tracks the
   growing city, not just network edits.
-- **Safety net**: Tier 2 compares a cheap structural hash (route ids +
-  per-route station-id lists); a mismatch promotes the refresh to a Tier 1
-  rebuild. Covers any structural edit that fires no route hook (in-place
-  route edits if unhooked, station deletion under a route).
+- **Structural hash — the primary edit detector**: Tier 2 compares a cheap
+  structural hash (route ids + per-route station-id lists); a mismatch
+  promotes the refresh to a Tier 1 rebuild. This is not a safety net:
+  decompile shows route edits (temp-route commits) fire **no hook** (§facts 5),
+  so edits are only ever caught here. Correctness holds because the promotion
+  runs before the daily growth step — no growth day uses a stale structure;
+  the hooks in Tier 1 merely make create/delete feel instant.
 
 | Work | When | Cost |
 |---|---|---|
@@ -243,24 +260,38 @@ New pure-function modules (tested standalone, `node:test`/tsx):
   saturation creep monotonicity; ledger round-trip incl. load order.
 - Migrated: all engine invariant tests (net-equal, caps, decay, tombstones)
   over the site abstraction.
-- In-game verification checklist (before calling it done):
-  1. `trainSchedule` field semantics (counts vs headway seconds).
-  2. `stComboTimings` populated on live routes.
-  3. Native demand-dot layer picks up materialized points (nudge).
-  4. Commute worker tolerates mid-session point additions (expected: yes,
+- **Performance indicators** (instrumented in the mod, not just tested once):
+  every Tier 1 rebuild, Tier 2 refresh, sampling pass, density fit, and daily
+  growth loop is timed with `performance.now()` and logged as a one-line
+  `[InducedDemand][perf]` summary (phase → ms, site/candidate counts). The
+  toolbar panel shows the last-run timings. Budgets asserted in-game on a
+  large city (e.g. NYC): Tier 1 rebuild < 100 ms, Tier 2 refresh < 15 ms,
+  daily loop < 50 ms, water-index load < 500 ms one-off. A budget breach logs
+  a `console.warn` so regressions surface during normal play.
+- In-game verification checklist (before calling it done). Resolved by
+  decompile, no longer need in-game checks: `trainSchedule` semantics (train
+  counts — §facts 4), route-edit hook behavior (none fires — §facts 5).
+  1. `stComboTimings` populated on live routes.
+  2. Native demand-dot layer picks up materialized points (nudge).
+  3. Commute worker tolerates mid-session point additions (expected: yes,
      reads live Maps each cycle).
-  5. `ocean_depth_index` availability across cities (fallback: no water mask
+  4. `ocean_depth_index` availability across cities (fallback: no water mask
      for that city + console warning).
-  6. Whether editing an existing route's stops fires `onRouteCreated` (or any
-     hook). If not, the Tier 2 structural-hash safety net is the only catch —
-     verify it detects an in-place route edit by the next day end.
+  5. Structural hash detects an in-place route edit by the next day end
+     (edits fire no hook — this path is the only edit detector).
+  6. Perf budgets hold on a large city (see performance indicators above).
 
 ### 11. Config additions (`config.ts`)
 
 `TAU_REACH`, `R_MIN`, `R_MAX`, `J_FRAC`, `RHO_DENSIFY`, `SAT_THRESHOLD`,
 `FIT_SPACING_QUANTILE`, `FIT_MASS_QUANTILE`, `ENVELOPE_QUANTILE`,
 `RES_SHARE`/`JOB_SHARE` (empty-site cap split), nominal transit speed
-(timings fallback). Removed: `CONNECTIVITY_REF` (line-count connectivity).
+(timings fallback), perf budget constants (Tier 1/Tier 2/daily-loop ms).
+Removed: `CONNECTIVITY_REF` (line-count connectivity).
+
+Typings: add optional `Route.timetableSchedule`
+(`{ mode: string; periods: { headwaySeconds: number; … }[] }`, `@verified`
+against the build) to `game-state.d.ts`.
 
 ## Out of scope
 

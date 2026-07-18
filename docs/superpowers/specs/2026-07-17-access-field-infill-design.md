@@ -178,15 +178,35 @@ cycle: **residential access / commercial access / growth pressure**. Rebuild on
 network change; `setData` on day change. The `demandBubbleScale` nudge stays —
 it is what makes the *native* dot layer notice newly materialized points.
 
-### 8. Performance budget
+### 8. Recalculation triggers & performance budget
+
+Two-tier trigger model (user decision — overlap heavy work with build
+gestures; never chase train events):
+
+- **Tier 1 — structural rebuild** on `onRouteCreated` / `onRouteDeleted` /
+  `onStationBuilt` / `onStationDeleted`, **debounced** (short idle delay —
+  blueprints and batch edits fire event bursts). Full pass: graph topology,
+  new-catchment sampling, density fit, Dijkstra, access cache, heatmap
+  rebuild. Lands right after the user's edit, where a few ms is
+  perceptually free.
+- **Tier 2 — weight refresh** on day end, every day, before the growth step:
+  re-read live train counts → headway/wait weights → Dijkstra → opportunity →
+  cached per-site access. No subscription to `onTrainSpawned`/`onTrainDeleted`
+  (users batch-add trains; per-event recompute is a perf hazard). Side
+  benefit: demand-mass sums refresh daily, so opportunity tracks the growing
+  city, not just network edits.
+- **Safety net**: Tier 2 compares a cheap structural hash (route ids +
+  per-route station-id lists); a mismatch promotes the refresh to a Tier 1
+  rebuild. Covers any route-edit path that fires no hook.
 
 | Work | When | Cost |
 |---|---|---|
-| Station graph + per-station Dijkstra + mass sums | network change | S ≤ ~200 stations → ms |
-| Density fit (NN + quantile bins) | load / network change | O(P log P), P ≈ 6k → ms |
-| Blue-noise sampling + water mask | new catchment area only | O(area/r²), few k candidates |
+| Station graph + per-station Dijkstra + mass sums | Tier 1 (debounced structural events) | S ≤ ~200 stations → ms |
+| Density fit (NN + quantile bins) | load / Tier 1 | O(P log P), P ≈ 6k → ms |
+| Blue-noise sampling + water mask | Tier 1, new catchment area only | O(area/r²), few k candidates |
 | Water index load + parse | once per city | ~2.4 MB JSON |
-| Daily loop | in-game day | O(sites); access cached O(1) — cheaper per site than today |
+| Weight refresh (Dijkstra + opportunity + access cache) | Tier 2 (day end) | ms |
+| Daily growth loop | day end, after Tier 2 | O(sites); access cached O(1) — cheaper per site than today |
 | Heatmap refresh | day change | one `setData` |
 
 ### 9. Module layout
@@ -219,6 +239,9 @@ New pure-function modules (tested standalone, `node:test`/tsx):
      reads live Maps each cycle).
   5. `ocean_depth_index` availability across cities (fallback: no water mask
      for that city + console warning).
+  6. Whether editing an existing route's stops fires `onRouteCreated` (or any
+     hook). If not, the Tier 2 structural-hash safety net is the only catch —
+     verify it detects an in-place route edit by the next day end.
 
 ### 11. Config additions (`config.ts`)
 

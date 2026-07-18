@@ -501,6 +501,7 @@ if (!api) {
   let heatRev = 0;
   let heatPending = false;
   let lastHeatKey = '';
+  let lastHeatEmpty = false;
   const rafSchedule = (fn: () => void): void => {
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn);
     else setTimeout(fn, 16);
@@ -525,10 +526,12 @@ if (!api) {
     }
     const heatKey = `${view}:${heatRev}`;
     if (heatKey !== lastHeatKey) { // re-bake only when content changed
-      updateHeatmap(api, buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG));
+      const fc = buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG);
+      updateHeatmap(api, fc);
+      lastHeatEmpty = fc.features.length === 0;
       lastHeatKey = heatKey;
     }
-    setHeatmapVisible(api, true);
+    setHeatmapVisible(api, !lastHeatEmpty); // an empty view shows nothing, not a stale image
   }
 
   /**

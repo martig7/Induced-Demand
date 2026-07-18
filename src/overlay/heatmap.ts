@@ -246,6 +246,10 @@ export function updateHeatmap(api: ModdingAPI, fc: HeatFeatureCollection): void 
   const rawMap = api.utils.getMap();
   if (!rawMap) return;
   installMapErrorGuard(rawMap);
+  // An empty field has no bounds — feeding MapLibre a zero-area image makes
+  // setCoordinates compute z = log2(size/0) = Infinity ("outside of bounds").
+  // Leave any prior image in place; the caller hides the layer for empty fields.
+  if (fc.features.length === 0) return;
   const map = rawMap as unknown as MapLike;
   const raster = rasterizeField(fc.features);
   const canvas = document.createElement('canvas');

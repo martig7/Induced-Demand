@@ -305,11 +305,12 @@ function fieldBeforeId(map: MapLike): string | undefined {
     }
     if (!loggedLayers) {
       loggedLayers = true;
-      // One-time dump so the airport/park layer ids can be identified exactly
-      // (the COVER_LAYER regex is a guess until we see the real style).
-      console.log('[InducedDemand] map style layers (index: id [type]):\n'
-        + layers.map((l, i) => `  ${i}: ${l.id} [${l.type}]${COVER_LAYER.test(l.id) ? ' ← cover' : ''}`).join('\n'));
-      console.log(`[InducedDemand] field inserts before "${beforeId ?? '(top)'}" (last cover layer index ${lastCover})`);
+      // Confirmed against the shipped style: cover layers are parks-large,
+      // parks-small, airports (all fill-extrusion); the field anchors above them
+      // at ocean-depth-labels. One concise breadcrumb in case a city's style
+      // names these layers differently — re-log the full list if it looks wrong.
+      const covers = layers.filter((l) => COVER_LAYER.test(l.id)).map((l) => l.id);
+      console.log(`[InducedDemand] field inserts before "${beforeId ?? '(top)'}"; over [${covers.join(', ')}]`);
     }
     return beforeId; // undefined → field on top (nothing above the fills)
   } catch {

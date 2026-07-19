@@ -527,7 +527,15 @@ if (!api) {
     }
     const heatKey = `${view}:${heatRev}`;
     if (heatKey !== lastHeatKey) { // re-bake only when content changed
-      const fc = buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG);
+      // Pressure view: render split pressure at each cell's prospective cut
+      // location — where the next point would appear, and how close it is.
+      const cuts = view !== 'pressure' || !f.cells ? [] : [...f.cells.entries()]
+        .filter(([id, cell]) => cell.centroid !== null && (ledger.cells?.[id] ?? 0) > 0)
+        .map(([id, cell]) => ({
+          location: [cell.centroid![0], cell.centroid![1]] as [number, number],
+          t: (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.SPLIT_THRESHOLD,
+        }));
+      const fc = buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG, cuts);
       updateHeatmap(api, fc);
       lastHeatEmpty = fc.features.length === 0;
       lastHeatKey = heatKey;

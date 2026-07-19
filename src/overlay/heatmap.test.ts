@@ -104,3 +104,27 @@ test('rasterizeField: max-combine, not sum — two coincident sites do not excee
   };
   assert.deepEqual(center(two), center(one));
 });
+
+// --- prospective cuts (Voronoi subdivision) ----------------------------------
+
+test('pressure view: prospective cuts render with t = pressure/threshold', () => {
+  const led = newLedger();
+  led.points.a = { baselineResidents: 0, baselineJobs: 0, resAccum: 100, jobAccum: 0 };
+  const cuts = [{ location: [3, 3] as [number, number], t: 0.6 }];
+  const fc = buildHeatFeatures(sites, led, 'pressure', DEFAULT_CONFIG, cuts);
+  const cut = fc.features.find((f) => f.properties.id === 'cut:0');
+  assert.ok(cut, 'cut feature present');
+  assert.equal(cut!.properties.t, 0.6);
+  assert.deepEqual(cut!.geometry.coordinates, [3, 3]);
+});
+
+test('access views ignore cuts; negligible cut pressure dropped', () => {
+  const cuts = [
+    { location: [3, 3] as [number, number], t: 0.6 },
+    { location: [4, 4] as [number, number], t: 0.001 },
+  ];
+  const accessFc = buildHeatFeatures(sites, newLedger(), 'accessRes', DEFAULT_CONFIG, cuts);
+  assert.ok(!accessFc.features.some((f) => f.properties.id.startsWith('cut:')));
+  const pressureFc = buildHeatFeatures(sites, newLedger(), 'pressure', DEFAULT_CONFIG, cuts);
+  assert.equal(pressureFc.features.filter((f) => f.properties.id.startsWith('cut:')).length, 1);
+});

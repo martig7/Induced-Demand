@@ -52,11 +52,16 @@ function absoluteValue(s: Site, ledger: LedgerState, view: Exclude<HeatView, 'of
   return clamp01(Math.max(e?.resAccum ?? 0, e?.jobAccum ?? 0, 0) / cfg.POP_SIZE);
 }
 
+/** A cell's prospective cut for the pressure view: where the next point would appear. */
+export interface ProspectiveCut { location: [number, number]; t: number }
+
 export function buildHeatFeatures(
   sites: Site[],
   ledger: LedgerState,
   view: Exclude<HeatView, 'off'>,
   cfg: InducedDemandConfig,
+  /** Pressure view only: split pressure rendered at each cell's prospective cut. */
+  cuts: ProspectiveCut[] = [],
 ): HeatFeatureCollection {
   const features: HeatFeature[] = [];
   let maxValue = 0;
@@ -68,6 +73,18 @@ export function buildHeatFeatures(
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [s.location[0], s.location[1]] },
       properties: { id: s.id, t },
+    });
+  }
+  if (view === 'pressure') {
+    cuts.forEach((c, i) => {
+      const t = clamp01(c.t);
+      if (t < MIN_VALUE) return;
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: c.location },
+        properties: { id: `cut:${i}`, t },
+      });
+      if (t > maxValue) maxValue = t;
     });
   }
   return { type: 'FeatureCollection', features, maxValue };

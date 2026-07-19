@@ -58,11 +58,19 @@ export interface InducedDemandConfig {
   // --- Voronoi subdivision (spec 2026-07-18) ---
   /** Lattice sample pitch (m) for cell integration. */
   LATTICE_M: number;
-  /** Split-pressure gain per day: pressure += SPLIT_RATE * deficit * fill. */
-  SPLIT_RATE: number;
-  /** Pressure (people-days) at which a cell may split; also the accumulator cap. */
-  SPLIT_THRESHOLD: number;
-  /** Global cap on cell splits per day. */
+  /**
+   * Days a maximally-starved, fully-filled cell takes to split. Split pressure
+   * is dimensionless — (deficit/supportedMass)×fill per day, 0..1 — so this
+   * constant means the same thing in every city (city-independent by design).
+   */
+  TARGET_SPLIT_DAYS: number;
+  /**
+   * Fraction of the day's demand growth (N·POP_SIZE people) spent opening new
+   * locations. Calibrates the split budget to the city's growth rate — a slow
+   * town splits rarely, a booming metropolis proportionally more.
+   */
+  GROWTH_SHARE: number;
+  /** Hard ceiling on the calibrated split budget (safety). */
   MAX_SPLITS_PER_DAY: number;
 }
 
@@ -94,7 +102,7 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   RES_SHARE: 0.5,
   JOB_SHARE: 0.5,
   LATTICE_M: 250,
-  SPLIT_RATE: 1,
-  SPLIT_THRESHOLD: 50_000,
-  MAX_SPLITS_PER_DAY: 3,
+  TARGET_SPLIT_DAYS: 30,
+  GROWTH_SHARE: 0.1,
+  MAX_SPLITS_PER_DAY: 12,
 };

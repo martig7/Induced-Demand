@@ -63,7 +63,7 @@ export interface LedgerState {
   /**
    * Split-pressure accumulators per Voronoi cell, keyed by anchor point id.
    * Sparse (nonzero only). Pressure accrues ∝ deficit × fill (spec 2026-07-18)
-   * and a split consumes SPLIT_THRESHOLD.
+   * and a split consumes TARGET_SPLIT_DAYS of it.
    */
   cells?: Record<string, number>;
   /** Monotonic counter for induced-pt ids (never reused). */
@@ -347,7 +347,7 @@ export function restoreTombstoneStubs(
  * were all retired: a permanent husk). A record with neither is a FRESH SPLIT
  * that hasn't received its first pop yet — cell splits create points empty by
  * design, and a save/reload in that window must not silently lose the split
- * (the parent cell already paid SPLIT_THRESHOLD for it).
+ * (the parent cell already spent TARGET_SPLIT_DAYS of pressure on it).
  */
 export function recreateMaterializedPoints(
   dd: DemandData,

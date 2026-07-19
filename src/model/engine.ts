@@ -158,10 +158,13 @@ export function runDay(
     }
   }
 
-  // D. Voronoi subdivision (spec 2026-07-18): split pressure accrues per cell
-  // ∝ deficit × fill; the top cells at threshold split into a new point at a
-  // valid sample near the access-weighted centroid. Slow by construction —
-  // SPLIT_RATE/SPLIT_THRESHOLD/MAX_SPLITS_PER_DAY are the tuning knobs.
+  // D. Voronoi subdivision (spec 2026-07-18): split pressure is DIMENSIONLESS —
+  // each day a cell accrues (deficit / supportedMass) × fill, i.e. its relative
+  // under-supply (0..1) scaled by how full its anchor is (0..1). Pressure is
+  // therefore in DAYS: a maximally-starved, fully-filled cell splits in
+  // TARGET_SPLIT_DAYS. This is city-independent by construction — Tokyo and
+  // Denver use the same number even though their absolute masses differ, and
+  // persisted pressures stay meaningful across recalibration.
   let newPoints = 0;
   if (deps.cells) {
     if (!ledger.cells) ledger.cells = {};
@@ -172,20 +175,25 @@ export function runDay(
     const ready: { id: string; pressure: number; centroid: Coordinate }[] = [];
     for (const [id, integral] of deps.cells) {
       const p = dd.points.get(id);
-      if (!p || !integral.centroid) continue;
+      if (!p || !integral.centroid || integral.supportedMass <= 0) continue;
       const capTotal = (capRes.get(id) ?? 0) + (capJob.get(id) ?? 0);
       if (capTotal <= 0) continue;
-      const deficit = Math.max(0, integral.supportedMass - capTotal);
-      const fill = Math.min(1, Math.max(0, (p.residents + p.jobs) / capTotal));
-      const next = Math.min(
-        cfg.SPLIT_THRESHOLD,
-        (ledger.cells[id] ?? 0) + cfg.SPLIT_RATE * deficit * fill,
-      );
+      const relDeficit = Math.max(0, 1 - capTotal / integral.supportedMass); // 0..1
+      const fill = Math.min(1, Math.max(0, (p.residents + p.jobs) / capTotal)); // 0..1
+      const next = Math.min(cfg.TARGET_SPLIT_DAYS, (ledger.cells[id] ?? 0) + relDeficit * fill);
       if (next !== 0) ledger.cells[id] = next; else delete ledger.cells[id];
-      if (next >= cfg.SPLIT_THRESHOLD) ready.push({ id, pressure: next, centroid: integral.centroid });
+      if (next >= cfg.TARGET_SPLIT_DAYS) ready.push({ id, pressure: next, centroid: integral.centroid });
     }
     ready.sort((a, b) => (b.pressure - a.pressure) || (a.id < b.id ? -1 : 1));
-    for (const cell of ready.slice(0, cfg.MAX_SPLITS_PER_DAY)) {
+
+    // Split budget is CALIBRATED to the city: at most GROWTH_SHARE of the day's
+    // demand growth (N pops → people) is spent opening new locations, each of
+    // which opens ~a median cell's worth of supported mass. A slow-growing town
+    // splits rarely; a booming metropolis expands proportionally — no absolute
+    // per-city cap. Floored at 1 (a genuinely ready cell always gets through)
+    // and hard-capped for safety.
+    const budget = splitBudget([...deps.cells.values()], N, cfg);
+    for (const cell of ready.slice(0, budget)) {
       const cut = deps.findCut(cell.id, cell.centroid);
       if (!cut) continue; // pressure stays capped; retries when geometry/access changes
       const pid = `${INDUCED_POINT_PREFIX}${ledger.ptSeq ?? 0}`;
@@ -194,13 +202,33 @@ export function runDay(
       if (!ledger.materialized) ledger.materialized = {};
       ledger.materialized[pid] = { location: [cut[0], cut[1]] };
       ledger.points[pid] = { baselineResidents: 0, baselineJobs: 0, resAccum: 0, jobAccum: 0 };
-      ledger.cells[cell.id] -= cfg.SPLIT_THRESHOLD;
+      ledger.cells[cell.id] -= cfg.TARGET_SPLIT_DAYS;
       if (ledger.cells[cell.id] === 0) delete ledger.cells[cell.id];
       newPoints++;
     }
   }
 
   return { added, removed, newPoints, deltas };
+}
+
+/**
+ * City-calibrated split budget for one day. `N` is the day's pop budget
+ * (reconcile output); `N × POP_SIZE` is the people of demand growth available.
+ * Spending at most `GROWTH_SHARE` of that on opening locations, each worth ~a
+ * median cell's supported mass, gives a size-proportional split rate with no
+ * absolute per-city constant. Floored at 1 so a ready cell is never starved;
+ * hard-capped by MAX_SPLITS_PER_DAY. Exported for testing.
+ */
+export function splitBudget(
+  cells: { supportedMass: number }[],
+  N: number,
+  cfg: InducedDemandConfig,
+): number {
+  const masses = cells.map((c) => c.supportedMass).filter((m) => m > 0).sort((a, b) => a - b);
+  const medianMass = masses.length > 0 ? masses[Math.floor(masses.length / 2)] : 0;
+  if (medianMass <= 0) return Math.min(1, cfg.MAX_SPLITS_PER_DAY);
+  const openable = Math.floor((cfg.GROWTH_SHARE * N * cfg.POP_SIZE) / medianMass);
+  return Math.max(1, Math.min(cfg.MAX_SPLITS_PER_DAY, openable));
 }
 
 /** A removed pop changes demand at BOTH endpoints — attribute it to each (before deferral). */

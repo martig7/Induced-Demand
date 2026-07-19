@@ -537,7 +537,7 @@ if (!api) {
         .filter(([id, cell]) => cell.centroid !== null && (ledger.cells?.[id] ?? 0) > 0)
         .map(([id, cell]) => ({
           location: [cell.centroid![0], cell.centroid![1]] as [number, number],
-          t: (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.SPLIT_THRESHOLD,
+          t: (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS,
         }));
       const fc = buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG, cuts);
       updateHeatmap(api, fc);

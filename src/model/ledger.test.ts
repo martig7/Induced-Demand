@@ -444,7 +444,7 @@ test('recreateMaterializedPoints: recreates referenced, GCs husks with evidence 
 
 test('recreateMaterializedPoints: a fresh split (no pops yet, no tombstones) survives reload', () => {
   // Splits create points EMPTY; a save/reload before the first pop lands must
-  // not lose the split — the parent cell already paid SPLIT_THRESHOLD for it.
+  // not lose the split — the parent cell already spent its accrued split pressure on it.
   const dd: DemandData = { points: new Map(), popsMap: new Map() };
   const led = newLedger();
   led.materialized = { 'induced-pt:0': { location: [5, 6] } };

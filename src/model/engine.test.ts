@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runDay, type RunDayDeps } from './engine';
+import { runDay, splitBudget, type RunDayDeps } from './engine';
 import { newLedger, captureBaselines, retirePendingRemovals, type LedgerState } from './ledger';
 import { isInduced } from './popFactory';
 import { makeRng } from './gravity';
@@ -201,12 +201,13 @@ test('runDay deltas contain only touched points', () => {
 
 // --- Voronoi subdivision: the split step (spec 2026-07-18) -------------------
 
-test('split: pressure accrues ∝ deficit × fill and splits at threshold', () => {
+test('split: dimensionless pressure (relDeficit × fill) reaches TARGET_SPLIT_DAYS and splits', () => {
   const dd = makeDD([point('n1', 0, 0, 1000, 1000)]);
   const ledger = newLedger();
   const sites = [siteOf(dd.points.get('n1')!, 0.8)];
-  // Huge supported mass + full anchor → one day crosses a small threshold.
-  const cfgFast = { ...DEFAULT_CONFIG, SPLIT_THRESHOLD: 1000, SPLIT_RATE: 1 };
+  // Huge supported mass (relDeficit≈1) + full-ish anchor (fill≈0.7) accrues
+  // ~0.7/day; a 0.5-day target crosses in one day.
+  const cfgFast = { ...DEFAULT_CONFIG, TARGET_SPLIT_DAYS: 0.5 };
   const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
   const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
     massAt: () => 2000, cells, findCut: (_id, c) => c,
@@ -219,11 +220,12 @@ test('split: pressure accrues ∝ deficit × fill and splits at threshold', () =
   assert.equal(ledger.points[pid].baselineResidents, 0);
 });
 
-test('split: empty anchor (fill 0) never splits regardless of deficit', () => {
+test('split: an empty anchor (fill 0) never accrues pressure regardless of deficit', () => {
+  // Materialized point with a real cap (massAt) but zero current demand → fill 0.
   const dd = makeDD([point('n1', 0, 0, 0, 0)]);
-  dd.points.get('n1')!.residents = 0;
-  dd.points.get('n1')!.jobs = 0;
   const ledger = newLedger();
+  ledger.materialized = { n1: { location: [0, 0] } };
+  ledger.points.n1 = { baselineResidents: 0, baselineJobs: 0, resAccum: 0, jobAccum: 0 };
   const sites = [siteOf(dd.points.get('n1')!, 0.8)];
   const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
   runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), {
@@ -232,31 +234,45 @@ test('split: empty anchor (fill 0) never splits regardless of deficit', () => {
   assert.equal(ledger.cells?.n1 ?? 0, 0);
 });
 
-test('split: budget caps splits per day, highest pressure first', () => {
+test('split: budget floors to 1 — one split even with many ready cells, id tie-break', () => {
+  // Four cells pre-seeded at the day target: all ready, equal pressure. The
+  // calibrated budget floors to 1 (huge cells, tiny N), so exactly one splits;
+  // the pressure-desc/id-asc order picks 'a'.
   const pts = [point('a', 0, 0, 1000, 1000), point('b', 0.1, 0, 1000, 1000),
     point('c', 0.2, 0, 1000, 1000), point('d', 0.3, 0, 1000, 1000)];
   const dd = makeDD(pts);
   const ledger = newLedger();
-  ledger.cells = { a: 999, b: 999, c: 999, d: 999 };
+  ledger.cells = { a: 30, b: 30, c: 30, d: 30 }; // == default TARGET_SPLIT_DAYS
   const sites = pts.map((p) => siteOf(dd.points.get(p.id)!, 0.8));
-  const cfgFast = { ...DEFAULT_CONFIG, SPLIT_THRESHOLD: 1000, MAX_SPLITS_PER_DAY: 2 };
   const cells = new Map(pts.map((p) => [p.id,
     { supportedMass: 1e6, centroid: [p.location[0] + 0.01, 0] as [number, number] }]));
-  const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
+  const r = runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), {
     massAt: () => 2000, cells, findCut: (_id, c) => c,
   });
-  assert.equal(r.newPoints, 2);
+  assert.equal(r.newPoints, 1);
+  assert.equal(ledger.cells?.a, undefined); // 'a' split (pressure consumed → 0 → deleted)
+  assert.equal(ledger.cells?.b, DEFAULT_CONFIG.TARGET_SPLIT_DAYS); // others untouched
 });
 
 test('split: findCut null leaves pressure capped, no point', () => {
   const dd = makeDD([point('n1', 0, 0, 1000, 1000)]);
   const ledger = newLedger();
   const sites = [siteOf(dd.points.get('n1')!, 0.8)];
-  const cfgFast = { ...DEFAULT_CONFIG, SPLIT_THRESHOLD: 1000 };
+  const cfgFast = { ...DEFAULT_CONFIG, TARGET_SPLIT_DAYS: 0.5 };
   const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
   const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
     massAt: () => 2000, cells, findCut: () => null,
   });
   assert.equal(r.newPoints, 0);
-  assert.equal(ledger.cells?.n1, 1000); // capped at threshold, retries later
+  assert.equal(ledger.cells?.n1, 0.5); // capped at the day target, retries later
+});
+
+test('splitBudget: scales with growth, floors at 1, hard-caps', () => {
+  const cfg = DEFAULT_CONFIG; // GROWTH_SHARE 0.1, POP_SIZE 200, MAX_SPLITS_PER_DAY 12
+  const cells = (mass: number, n = 5) => Array.from({ length: n }, () => ({ supportedMass: mass }));
+  // median mass 1000, N=200 → floor(0.1·200·200/1000) = 4
+  assert.equal(splitBudget(cells(1000), 200, cfg), 4);
+  assert.equal(splitBudget(cells(1000), 0, cfg), 1);                       // no growth → floor 1
+  assert.equal(splitBudget(cells(1000), 100000, cfg), cfg.MAX_SPLITS_PER_DAY); // hard cap
+  assert.equal(splitBudget([], 200, cfg), 1);                             // no cells → floor 1
 });

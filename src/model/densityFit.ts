@@ -3,8 +3,7 @@
  * how dense is this city, when it's dense?" Two monotone curves over access bins —
  * spacing (low quantile of NN distance; high access packs tighter) and people
  * mass (upper quantile; clamped by the city-wide envelope so induced sprawl can
- * never out-dense what the map demonstrates). The ceiling multiplier creeps up
- * while the city is saturated (never down — cities don't un-build).
+ * never out-dense what the map demonstrates).
  */
 import type { Coordinate } from '../types/core';
 import type { InducedDemandConfig } from './config';

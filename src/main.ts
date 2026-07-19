@@ -529,6 +529,10 @@ if (!api) {
     if (heatKey !== lastHeatKey) { // re-bake only when content changed
       // Pressure view: render split pressure at each cell's prospective cut
       // location — where the next point would appear, and how close it is.
+      // APPROXIMATION: uses the raw access-weighted centroid, not findCut's
+      // validated sample (running findCut per cell per refresh would be
+      // costly) — the marker can sit slightly off the real cut, or over
+      // water when validity pushes the actual cut elsewhere.
       const cuts = view !== 'pressure' || !f.cells ? [] : [...f.cells.entries()]
         .filter(([id, cell]) => cell.centroid !== null && (ledger.cells?.[id] ?? 0) > 0)
         .map(([id, cell]) => ({

@@ -94,3 +94,15 @@ test('findCut: null when water or spacing exclude every sample', () => {
   });
   assert.equal(cut, null);
 });
+
+test('createAnchorIndex: nearer axial anchor two rings out beats a diagonal first hit', () => {
+  // Reviewer repro: query near a cell corner. A sits diagonally in ring 0 at
+  // ~704m; B sits axially two rings away at ~502m. A fixed "first hit + 1"
+  // ring guard returns A; the distance-sound guard must return B.
+  const M = 1 / 111194.9; // degrees per meter at the equator frame
+  const idx = createAnchorIndex(anchors([
+    ['a-diagonal', 499 * M, 499 * M],
+    ['b-axial', -501 * M, 1 * M],
+  ]));
+  assert.equal(idx.nearest([1 * M, 1 * M])!.id, 'b-axial');
+});

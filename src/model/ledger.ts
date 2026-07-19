@@ -340,8 +340,14 @@ export function restoreTombstoneStubs(
 /**
  * Re-create materialized points the load dropped (run BEFORE reconcileInducedPops —
  * roster pops may reference `induced-pt:*` endpoints and the commute worker
- * requires live endpoints). Unreferenced records are garbage-collected: their
- * pops are gone, so the point would be a permanent husk.
+ * requires live endpoints).
+ *
+ * GC rule: a record is dropped only when it has EVIDENCE OF DEATH — no live
+ * roster pop references it AND at least one tombstone does (its pops lived and
+ * were all retired: a permanent husk). A record with neither is a FRESH SPLIT
+ * that hasn't received its first pop yet — cell splits create points empty by
+ * design, and a save/reload in that window must not silently lose the split
+ * (the parent cell already paid SPLIT_THRESHOLD for it).
  */
 export function recreateMaterializedPoints(
   dd: DemandData,
@@ -354,9 +360,14 @@ export function recreateMaterializedPoints(
     referenced.add(rec.residenceId);
     referenced.add(rec.jobId);
   }
+  const tombReferenced = new Set<string>();
+  for (const rec of Object.values(ledger.tombstones ?? {})) {
+    tombReferenced.add(rec.residenceId);
+    tombReferenced.add(rec.jobId);
+  }
   for (const [pid, rec] of Object.entries(ledger.materialized)) {
     if (dd.points.has(pid)) continue;
-    if (!referenced.has(pid)) {
+    if (!referenced.has(pid) && tombReferenced.has(pid)) {
       delete ledger.materialized[pid];
       dropped++;
       continue;

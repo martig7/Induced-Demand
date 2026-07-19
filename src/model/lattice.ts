@@ -51,24 +51,17 @@ export function createAnchorIndex(
     const b = grid.get(k);
     if (b) b.push(a); else grid.set(k, [a]);
   }
-  const ringHas = (cx: number, cy: number, r: number): boolean => {
-    for (let dx = -r; dx <= r; dx++) {
-      for (let dy = -r; dy <= r; dy++) {
-        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-        if (grid.has(`${cx + dx},${cy + dy}`)) return true;
-      }
-    }
-    return false;
-  };
   const scanRings = (c: Coordinate, maxRing: number): { id: string; location: Coordinate } | null => {
     const { cx, cy } = cellOf(c);
-    let firstHit = -1;
     let best: { id: string; location: Coordinate } | null = null;
     let bestD = Infinity;
     for (let r = 0; r <= maxRing; r++) {
-      if (firstHit >= 0 && r > firstHit + 1) break; // ring r+1 guard covers diagonal cases
-      if (!ringHas(cx, cy, r)) continue;
-      if (firstHit < 0) firstHit = r;
+      // Distance-sound stop: any anchor in a ring-r cell is at least (r−1)·CELL_M
+      // from the query (which may sit anywhere in its own cell), so once that
+      // lower bound reaches the best distance found, no farther ring can win.
+      // (A fixed "first hit + 1" guard is NOT sound: a diagonal ring-r anchor can
+      // be √2·(r+1) cells away while a nearer one sits axially in ring r+2.)
+      if (best !== null && (r - 1) * CELL_M >= bestD) break;
       for (let dx = -r; dx <= r; dx++) {
         for (let dy = -r; dy <= r; dy++) {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
@@ -204,6 +197,12 @@ export interface FindCutOpts {
  * access-weighted centroid. Valid = access ≥ minAccess, dry, inside the cell
  * (nearest anchor is the splitting anchor), and ≥ spacingAt(access) from every
  * existing point. Null when nothing qualifies (the cell cannot split yet).
+ *
+ * KNOWN BOUND: the search disc (searchR below) is a heuristic and may not cover
+ * a very elongated cell's far reaches — such a cell can sit at threshold with a
+ * permanently null cut until its geometry or access changes. Accepted: bounded
+ * cost beats exhaustive cell scans, and elongated starved cells shrink as
+ * neighbors split.
  */
 export function findCut(opts: FindCutOpts): Coordinate | null {
   const { deps } = opts;

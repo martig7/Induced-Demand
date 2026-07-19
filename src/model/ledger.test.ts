@@ -421,13 +421,15 @@ test('serialize: empty records are omitted; legacy sites/densify are dropped sil
   assert.equal(revived.seq, 3);
 });
 
-test('recreateMaterializedPoints: recreates referenced, GCs unreferenced', () => {
+test('recreateMaterializedPoints: recreates referenced, GCs husks with evidence of death', () => {
   const dd: DemandData = { points: new Map(), popsMap: new Map() };
   const led = newLedger();
   led.pops['induced:0'] = { residenceId: 'induced-pt:0', jobId: 'native1' };
+  // induced-pt:1 lived and died: no roster pop, but a tombstone references it.
+  led.tombstones = { 'induced:9': { residenceId: 'induced-pt:1', jobId: 'native1' } };
   led.materialized = {
     'induced-pt:0': { location: [1, 2], siteId: 's' },   // referenced by roster
-    'induced-pt:1': { location: [3, 4], siteId: 't' },   // orphaned → GC
+    'induced-pt:1': { location: [3, 4], siteId: 't' },   // dead husk → GC
   };
   const r = recreateMaterializedPoints(dd, led);
   assert.equal(r.recreated, 1);
@@ -438,6 +440,19 @@ test('recreateMaterializedPoints: recreates referenced, GCs unreferenced', () =>
   assert.equal(p!.jobs, 0);
   assert.deepEqual(p!.location, [1, 2]);
   assert.equal(led.materialized!['induced-pt:1'], undefined);
+});
+
+test('recreateMaterializedPoints: a fresh split (no pops yet, no tombstones) survives reload', () => {
+  // Splits create points EMPTY; a save/reload before the first pop lands must
+  // not lose the split — the parent cell already paid SPLIT_THRESHOLD for it.
+  const dd: DemandData = { points: new Map(), popsMap: new Map() };
+  const led = newLedger();
+  led.materialized = { 'induced-pt:0': { location: [5, 6] } };
+  const r = recreateMaterializedPoints(dd, led);
+  assert.equal(r.recreated, 1);
+  assert.equal(r.dropped, 0);
+  assert.ok(dd.points.get('induced-pt:0'));
+  assert.ok(led.materialized['induced-pt:0'], 'record kept');
 });
 
 test('recreateMaterializedPoints: existing points are left untouched', () => {

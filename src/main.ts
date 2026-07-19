@@ -44,7 +44,10 @@ import {
   stationMasses, computeOpportunities, buildAccessIndex,
   type StationOpportunity, type AccessIndex,
 } from './model/opportunity';
-import { fitDensity, massAt, type DensityFit, type FitInputPoint } from './model/densityFit';
+import {
+  fitDensity, massAt, spacingAt, supportedDensityAt, type DensityFit, type FitInputPoint,
+} from './model/densityFit';
+import { integrateCells, findCut, type CellIntegral, type LatticeDeps } from './model/lattice';
 import {
   buildPointSites, refreshSiteAccess, computeStructuralHash, computeServiceHash,
   type Site,
@@ -141,6 +144,8 @@ if (!api) {
       /** Station-proximity access lookups — O(nearby), float-identical to accessAt. */
       accessIdx: AccessIndex;
       fit: DensityFit;
+      /** Latest lattice integrals per anchor point id; null until the pass runs. */
+      cells: Map<string, CellIntegral> | null;
       hash: string;
       /** Weight inputs (schedules/timings) at the last opportunity compute. */
       serviceHash: string;
@@ -321,6 +326,40 @@ if (!api) {
     return fitDensity(fitInput, DEFAULT_CONFIG);
   }
 
+  /** Lattice dependency bundle — shared by the rebuild integration pass and day-loop findCut. */
+  function latticeDeps(
+    accessIdx: AccessIndex,
+    fit: DensityFit,
+    water: WaterIndex | null,
+  ): LatticeDeps {
+    return {
+      accessAt: (c) => accessIdx.at(c),
+      isWater: (c) => water?.isWater(c) ?? false,
+      supportedDensity: (a) => supportedDensityAt(fit, a),
+      spacingAt: (a) => spacingAt(fit, a),
+      minAccess: DEFAULT_CONFIG.MIN_SITE_ACCESS,
+    };
+  }
+
+  /** One integrateCells call for the current demand/station state (see rebuildField Phase C). */
+  function computeCells(
+    dd: DemandData,
+    stations: Station[],
+    accessIdx: AccessIndex,
+    fit: DensityFit,
+    water: WaterIndex | null,
+  ): Map<string, CellIntegral> {
+    return integrateCells({
+      anchors: [...dd.points.values()].map((p) => ({ id: p.id, location: p.location })),
+      stations: stations
+        .filter((s) => (s.routeIds?.length ?? 0) > 0)
+        .map((s) => s.coords),
+      catchmentM: DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED,
+      latticeM: DEFAULT_CONFIG.LATTICE_M,
+      deps: latticeDeps(accessIdx, fit, water),
+    });
+  }
+
   /** Increments to cancel an in-flight chunked rebuild (newer build/city/generation wins). */
   let fieldBuildGen = 0;
 
@@ -357,18 +396,29 @@ if (!api) {
     await yieldToLoop();
     if (stale()) return;
 
-    // Phase B: density fit + point sites (both ms-scale; Task 6 re-adds a
-    // chunked phase here for the subdivision lattice).
+    // Phase B: density fit + point sites (both ms-scale).
     const fit = computeFit(dd, weights.accessIdx);
     const sites = buildPointSites(dd, (c) => weights.accessIdx.at(c));
+    await yieldToLoop();
+    if (stale()) return;
+
+    // Phase C: lattice integration. One integrateCells call over ALL stations
+    // (its internal dedupe requires a single pass — batching stations would
+    // double-count overlapping catchment edges). ~50-100ms in one chunk: same
+    // budget class as the old sampling phase, amortized by the other yields;
+    // split into finer slices only if the perf line complains.
+    const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, water);
+    await yieldToLoop();
+    if (stale()) return;
+
     session.field = {
-      city, sites,
+      city, sites, cells,
       graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,
       fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
       water, waterFailed,
     };
     const total = performance.now() - t0;
-    perf.record('tier1', PERF_BUDGETS.tier1Total, total, `${sites.length} sites`);
+    perf.record('tier1', PERF_BUDGETS.tier1Total, total, `${sites.length} sites, ${cells.size} cells`);
     bumpHeat();
   }
 
@@ -384,8 +434,9 @@ if (!api) {
       const weights = computeWeights(dd);
       const fit = computeFit(dd, weights.accessIdx);
       const sites = buildPointSites(dd, (c) => weights.accessIdx.at(c));
+      const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, water);
       ensureSession().field = {
-        city, sites,
+        city, sites, cells,
         graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,
         fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
         water, waterFailed,
@@ -1126,8 +1177,16 @@ if (!api) {
           makeRng(hashSeed(currentCity(), day)),
           {
             massAt: (a) => massAt(field.fit, a),
-            cells: null,      // TEMPORARY (Task 4): lattice wired in Task 6
-            findCut: () => null,
+            cells: field.cells,
+            // Cut validity re-checks against the CURRENT points (splits earlier
+            // in the same loop may have added anchors since the lattice pass).
+            findCut: (anchorId, centroid) => findCut({
+              anchorId,
+              centroid,
+              anchors: [...dd.points.values()].map((p) => ({ id: p.id, location: p.location })),
+              latticeM: DEFAULT_CONFIG.LATTICE_M,
+              deps: latticeDeps(field.accessIdx, field.fit, field.water),
+            }),
           },
           liveSlotSet(), drivingModel(),
         ), (r) => `+${r.added}/-${r.removed}/${r.newPoints}pt`);
@@ -1137,6 +1196,11 @@ if (!api) {
       // Demand-mass drift feeds the Tier 2 refresh threshold (opportunities
       // track the growing city without a daily recompute).
       field.massDrift += (result.added + result.removed) * DEFAULT_CONFIG.POP_SIZE * 2;
+      if (result.newPoints > 0) {
+        // New anchors reshape the tessellation; refresh sites + cells in the
+        // background (debounced) — the new point starts growing after it.
+        scheduleFieldRebuild();
+      }
     } else if (DEBUG) {
       console.log(`${TAG} day ${day}: field not ready — growth skipped this day`);
     }

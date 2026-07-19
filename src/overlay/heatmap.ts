@@ -279,10 +279,29 @@ interface MapLike {
   getStyle(): { layers?: { id: string; type: string }[] } | undefined;
 }
 
-/** Keep the field beneath the base map's labels so streets/names stay readable. */
-function firstSymbolLayerId(map: MapLike): string | undefined {
+// Base-map layers the field should be drawn OVER (user asked for airport + park;
+// common green/landuse aliases included so differing styles degrade gracefully).
+const COVER_LAYER = /aero|airport|runway|taxiway|apron|park|garden|green|grass|wood|forest|meadow|golf|pitch|leisure|recreation|cemetery/i;
+
+/**
+ * Where to insert the field layer. It must render ABOVE base-map fills like
+ * airport aprons and parks (otherwise those paint over it), but stay BELOW the
+ * labels that sit over those fills so street/place names remain readable. So:
+ * find the last airport/park layer, then the first label (symbol) at or after
+ * it. Falls back to the first symbol overall when no such fills exist (original
+ * behavior), or to the very top when no label sits above them.
+ */
+function fieldBeforeId(map: MapLike): string | undefined {
   try {
-    return map.getStyle()?.layers?.find((l) => l.type === 'symbol')?.id;
+    const layers = map.getStyle()?.layers ?? [];
+    let lastCover = -1;
+    for (let i = 0; i < layers.length; i++) {
+      if (COVER_LAYER.test(layers[i].id)) lastCover = i;
+    }
+    for (let i = Math.max(0, lastCover + 1); i < layers.length; i++) {
+      if (layers[i].type === 'symbol') return layers[i].id;
+    }
+    return undefined; // nothing above the fills → field on top
   } catch {
     return undefined;
   }
@@ -363,7 +382,7 @@ export function updateHeatmap(api: ModdingAPI, raster: FieldRaster): void {
       source: HEAT_SOURCE_ID,
       layout: { visibility: 'none' },
       paint: { 'raster-opacity': 0.8, 'raster-resampling': 'linear', 'raster-fade-duration': 0 },
-    }, firstSymbolLayerId(map));
+    }, fieldBeforeId(map));
   } catch (e) {
     console.error('[InducedDemand] heat raster add failed', e);
   }

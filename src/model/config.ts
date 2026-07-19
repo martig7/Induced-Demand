@@ -36,13 +36,11 @@ export interface InducedDemandConfig {
   DEFAULT_WAIT_SECONDS: number;
   /** Floor (s) for the boarding wait. */
   MIN_WAIT_SECONDS: number;
-  // --- Site sampling ---
-  /** Min/max blue-noise spacing (m) between sites. */
+  // --- Spacing curve bounds ---
+  /** Min/max point spacing (m) — clamps the fitted spacing curve. */
   R_MIN: number;
   R_MAX: number;
-  /** Max jitter radius as a fraction of local spacing; soft spacing = (1−J_FRAC)·r. */
-  J_FRAC: number;
-  /** Empty candidate sites below this max(accessRes, accessCom) are dropped. */
+  /** Lattice samples below this max(accessRes, accessCom) are outside the field. */
   MIN_SITE_ACCESS: number;
   // --- Density fit ---
   /** Access bins for the density fit. */
@@ -53,15 +51,10 @@ export interface InducedDemandConfig {
   FIT_MASS_QUANTILE: number;
   /** City-wide people-mass quantile that clamps the mass curve (envelope). */
   ENVELOPE_QUANTILE: number;
-  // --- Empty-site caps ---
-  /** Residential / job share of an empty site's access-derived mass cap. */
+  // --- Materialized-point caps ---
+  /** Residential / job share of a materialized point's access-derived mass cap. */
   RES_SHARE: number;
   JOB_SHARE: number;
-  // --- Densification ---
-  /** Daily ceiling-creep rate while saturated. */
-  RHO_DENSIFY: number;
-  /** Saturation (filled induced headroom fraction) above which densify creeps. */
-  SAT_THRESHOLD: number;
   // --- Voronoi subdivision (spec 2026-07-18) ---
   /** Lattice sample pitch (m) for cell integration. */
   LATTICE_M: number;
@@ -93,7 +86,6 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   MIN_WAIT_SECONDS: 30,
   R_MIN: 150,
   R_MAX: 600,
-  J_FRAC: 0.35,
   MIN_SITE_ACCESS: 0.05,
   FIT_BINS: 8,
   FIT_SPACING_QUANTILE: 0.25,
@@ -101,8 +93,6 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   ENVELOPE_QUANTILE: 0.95,
   RES_SHARE: 0.5,
   JOB_SHARE: 0.5,
-  RHO_DENSIFY: 0.002,
-  SAT_THRESHOLD: 0.8,
   LATTICE_M: 250,
   SPLIT_RATE: 1,
   SPLIT_THRESHOLD: 50_000,

@@ -48,10 +48,8 @@ const MIN_VALUE = 0.03;
 function absoluteValue(s: Site, ledger: LedgerState, view: Exclude<HeatView, 'off'>, cfg: InducedDemandConfig): number {
   if (view === 'accessRes') return clamp01(s.accessRes);
   if (view === 'accessCom') return clamp01(s.accessCom);
-  const [ra, ja] = s.pointId
-    ? [(ledger.points[s.pointId]?.resAccum ?? 0), (ledger.points[s.pointId]?.jobAccum ?? 0)]
-    : (ledger.sites?.[s.id] ?? [0, 0]);
-  return clamp01(Math.max(ra, ja, 0) / cfg.POP_SIZE);
+  const e = ledger.points[s.pointId];
+  return clamp01(Math.max(e?.resAccum ?? 0, e?.jobAccum ?? 0, 0) / cfg.POP_SIZE);
 }
 
 export function buildHeatFeatures(

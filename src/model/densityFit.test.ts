@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  fitDensity, spacingAt, massAt, creepDensify, type FitInputPoint,
+  fitDensity, spacingAt, massAt, type FitInputPoint,
 } from './densityFit';
 import { DEFAULT_CONFIG } from './config';
 
@@ -63,12 +63,6 @@ test('fit: empty input degrades to flat clamped defaults, no throw', () => {
   assert.ok(massAt(fit, 0.5) >= 0);
 });
 
-test('creepDensify: grows only above threshold, never shrinks', () => {
-  assert.equal(creepDensify(1, 0.5, cfg), 1);
-  const grown = creepDensify(1, 0.9, cfg);
-  assert.ok(grown > 1 && grown < 1.001, `slow creep, got ${grown}`);
-  assert.equal(creepDensify(1.5, 0, cfg), 1.5); // monotone
-});
 
 // --- supported density (Voronoi subdivision) --------------------------------
 

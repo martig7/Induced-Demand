@@ -5,14 +5,11 @@ import { buildHeatFeatures } from './heatmap';
 import { newLedger } from '../model/ledger';
 import { DEFAULT_CONFIG } from './../model/config';
 
-// 'b' and 'c' model the legacy empty-candidate shape (pointId: null) that the
-// pressure view's ledger.sites branch still reads; Task 7 removes that branch
-// and these fixtures with it.
-const sites = [
+const sites: Site[] = [
   { id: 'a', pointId: 'a', location: [0, 0], accessRes: 0.9, accessCom: 0.2 },
-  { id: 'b', pointId: null, location: [1, 1], accessRes: 0.4, accessCom: 0.7 },
-  { id: 'c', pointId: null, location: [2, 2], accessRes: 0.001, accessCom: 0.001 },
-] as unknown as Site[];
+  { id: 'b', pointId: 'b', location: [1, 1], accessRes: 0.4, accessCom: 0.7 },
+  { id: 'c', pointId: 'c', location: [2, 2], accessRes: 0.001, accessCom: 0.001 },
+];
 
 test('accessRes view: t is the ABSOLUTE value; negligible dropped', () => {
   const fc = buildHeatFeatures(sites, newLedger(), 'accessRes', DEFAULT_CONFIG);
@@ -39,7 +36,7 @@ test('absolute scale: a site\'s color is independent of the rest of the field', 
 
 test('pressure view: t = min(1, accum / POP_SIZE), absolute', () => {
   const led = newLedger();
-  led.sites = { b: [DEFAULT_CONFIG.POP_SIZE * 2, 0] };
+  led.points.b = { baselineResidents: 0, baselineJobs: 0, resAccum: DEFAULT_CONFIG.POP_SIZE * 2, jobAccum: 0 };
   led.points.a = { baselineResidents: 0, baselineJobs: 0, resAccum: 100, jobAccum: 0 };
   const fc = buildHeatFeatures(sites, led, 'pressure', DEFAULT_CONFIG);
   const a = fc.features.find((f) => f.properties.id === 'a')!;

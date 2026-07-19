@@ -399,27 +399,26 @@ test('reconcileInducedPops never adopts an inert (size-0) stub as a live pop', (
 
 // --- access-field infill: ledger extensions -------------------------------
 
-test('serialize/deserialize round-trips sites, materialized, densify, ptSeq', () => {
+test('serialize/deserialize round-trips materialized and ptSeq', () => {
   const led = newLedger();
-  led.sites = { 'C:s1:0': [120, 0], 'C:s1:1': [0, 0] }; // second is zero → pruned
-  led.materialized = { 'induced-pt:0': { location: [1, 2], siteId: 'C:s1:4' } };
-  led.densify = 1.25;
+  led.materialized = { 'induced-pt:0': { location: [1, 2] } };
   led.ptSeq = 3;
   const back = deserializeFromStore(serializeForStore(led));
-  assert.deepEqual(back.sites, { 'C:s1:0': [120, 0] });
   assert.deepEqual(back.materialized, led.materialized);
-  assert.equal(back.densify, 1.25);
   assert.equal(back.ptSeq, 3);
 });
 
-test('serialize: defaults are omitted (no densify=1, no empty records)', () => {
+test('serialize: empty records are omitted; legacy sites/densify are dropped silently', () => {
   const led = newLedger();
-  led.densify = 1;
-  led.sites = {};
   const payload = JSON.parse(serializeForStore(led));
-  assert.equal(payload.densify, undefined);
-  assert.equal(payload.sites, undefined);
   assert.equal(payload.materialized, undefined);
+  assert.equal(payload.cells, undefined);
+  // Legacy payloads (candidate-site build) carry sites/densify — dropped on read.
+  const legacy = JSON.stringify({ seq: 3, pops: {}, accum: {}, sites: { x: [5, 0] }, densify: 1.2 });
+  const revived = deserializeFromStore(legacy);
+  assert.equal((revived as unknown as Record<string, unknown>).sites, undefined);
+  assert.equal((revived as unknown as Record<string, unknown>).densify, undefined);
+  assert.equal(revived.seq, 3);
 });
 
 test('recreateMaterializedPoints: recreates referenced, GCs unreferenced', () => {
@@ -481,18 +480,14 @@ test('composed load order: recreate -> baselines -> pops re-adds the pop without
   assert.equal(dd.points.get('n1')!.jobs, 500 + DEFAULT_CONFIG.POP_SIZE);
 });
 
-test('clearAllInduced: drops materialized records, keeps ptSeq, resets densify', () => {
+test('clearAllInduced: drops materialized records, keeps ptSeq', () => {
   const dd: DemandData = { points: new Map(), popsMap: new Map() };
   const led = newLedger();
   led.ptSeq = 5;
-  led.densify = 1.4;
-  led.materialized = { 'induced-pt:0': { location: [1, 2], siteId: 's' } };
-  led.sites = { s2: [50, 0] };
+  led.materialized = { 'induced-pt:0': { location: [1, 2] } };
   const { ledger: fresh } = clearAllInduced(dd, led, DEFAULT_CONFIG);
   assert.equal(fresh.ptSeq, 5);
-  assert.equal(fresh.densify ?? 1, 1);
   assert.equal(fresh.materialized, undefined);
-  assert.equal(fresh.sites, undefined);
 });
 
 // --- Voronoi subdivision: split-pressure cells -------------------------------

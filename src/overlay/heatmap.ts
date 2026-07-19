@@ -291,6 +291,7 @@ const COVER_LAYER = /aero|airport|runway|taxiway|apron|park|garden|green|grass|w
  * it. Falls back to the first symbol overall when no such fills exist (original
  * behavior), or to the very top when no label sits above them.
  */
+let loggedLayers = false;
 function fieldBeforeId(map: MapLike): string | undefined {
   try {
     const layers = map.getStyle()?.layers ?? [];
@@ -298,10 +299,19 @@ function fieldBeforeId(map: MapLike): string | undefined {
     for (let i = 0; i < layers.length; i++) {
       if (COVER_LAYER.test(layers[i].id)) lastCover = i;
     }
+    let beforeId: string | undefined;
     for (let i = Math.max(0, lastCover + 1); i < layers.length; i++) {
-      if (layers[i].type === 'symbol') return layers[i].id;
+      if (layers[i].type === 'symbol') { beforeId = layers[i].id; break; }
     }
-    return undefined; // nothing above the fills → field on top
+    if (!loggedLayers) {
+      loggedLayers = true;
+      // One-time dump so the airport/park layer ids can be identified exactly
+      // (the COVER_LAYER regex is a guess until we see the real style).
+      console.log('[InducedDemand] map style layers (index: id [type]):\n'
+        + layers.map((l, i) => `  ${i}: ${l.id} [${l.type}]${COVER_LAYER.test(l.id) ? ' ← cover' : ''}`).join('\n'));
+      console.log(`[InducedDemand] field inserts before "${beforeId ?? '(top)'}" (last cover layer index ${lastCover})`);
+    }
+    return beforeId; // undefined → field on top (nothing above the fills)
   } catch {
     return undefined;
   }

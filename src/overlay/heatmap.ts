@@ -134,6 +134,11 @@ const GRID_MAX = 1024;
  */
 const KERNEL_METERS = 400;
 
+/** Continuous access views sample cheaply per pixel — fewer pixels than the splat. */
+const ACCESS_GRID_MAX = 512;
+/** Ramp alpha from 0→full over [MIN_VALUE, MIN_VALUE + ALPHA_FADE]. */
+const ALPHA_FADE = 0.12;
+
 export interface RasterOptions {
   /** Longest grid dimension in pixels (the shorter side keeps aspect). */
   gridMax?: number;
@@ -145,9 +150,15 @@ export interface FieldRaster {
   data: Uint8ClampedArray;
   width: number;
   height: number;
-  /** [west, south, east, north] the raster covers (padded by the kernel). */
+  /** [west, south, east, north] the raster covers. */
   bbox: [number, number, number, number];
+  /** True when nothing renders (all-transparent) — caller hides the layer. */
+  empty: boolean;
 }
+
+const EMPTY_RASTER: FieldRaster = {
+  data: new Uint8ClampedArray(4), width: 1, height: 1, bbox: [0, 0, 0, 0], empty: true,
+};
 
 /**
  * Bake `features` into an RGBA field: each site contributes a Gaussian of its
@@ -158,9 +169,7 @@ export interface FieldRaster {
 export function rasterizeField(features: HeatFeature[], opts: RasterOptions = {}): FieldRaster {
   const gridMax = opts.gridMax ?? GRID_MAX;
   const kernelMeters = opts.kernelMeters ?? KERNEL_METERS;
-  if (features.length === 0) {
-    return { data: new Uint8ClampedArray(4), width: 1, height: 1, bbox: [0, 0, 0, 0] };
-  }
+  if (features.length === 0) return EMPTY_RASTER;
   let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
   for (const f of features) {
     const [lon, lat] = f.geometry.coordinates;
@@ -204,16 +213,58 @@ export function rasterizeField(features: HeatFeature[], opts: RasterOptions = {}
   }
 
   const data = new Uint8ClampedArray(width * height * 4);
-  const ALPHA_FADE = 0.12; // ramp alpha from 0→full over [MIN_VALUE, MIN_VALUE+ALPHA_FADE]
+  let any = false;
   for (let i = 0; i < grid.length; i++) {
     const v = grid[i];
     if (v < MIN_VALUE) continue; // leave transparent
+    any = true;
     const [r, g, b] = rampColor(v);
     const o = i * 4;
     data[o] = r; data[o + 1] = g; data[o + 2] = b;
     data[o + 3] = Math.round(255 * clamp01((v - MIN_VALUE) / ALPHA_FADE));
   }
-  return { data, width, height, bbox: [w, s, e, n] };
+  return { data, width, height, bbox: [w, s, e, n], empty: !any };
+}
+
+/**
+ * Bake a CONTINUOUS scalar field by evaluating `valueAt` per pixel over `bbox`,
+ * for the access views (spec 2026-07-18 follow-up): unlike rasterizeField, this
+ * shows access EVERYWHERE it exists — including empty land near a new station,
+ * which has no demand point to splat. `valueAt` returns access in [0,1]; the
+ * ramp + alpha fade match the splat path. Pixels far from stations return ~0 and
+ * cost almost nothing (the access index short-circuits empty grid cells).
+ */
+export function rasterizeAccessField(
+  bbox: [number, number, number, number],
+  valueAt: (lon: number, lat: number) => number,
+  opts: { gridMax?: number } = {},
+): FieldRaster {
+  const gridMax = opts.gridMax ?? ACCESS_GRID_MAX;
+  const [w, s, e, n] = bbox;
+  const spanLon = e - w, spanLat = n - s;
+  if (spanLon <= 0 || spanLat <= 0) return EMPTY_RASTER;
+  const midLat = (s + n) / 2;
+  const mPerLon = M_PER_DEG_LAT * Math.max(0.05, Math.cos((midLat * Math.PI) / 180));
+  const aspect = (spanLon * mPerLon) / (spanLat * M_PER_DEG_LAT);
+  const width = aspect >= 1 ? gridMax : Math.max(1, Math.round(gridMax * aspect));
+  const height = aspect >= 1 ? Math.max(1, Math.round(gridMax / aspect)) : gridMax;
+
+  const data = new Uint8ClampedArray(width * height * 4);
+  let any = false;
+  for (let y = 0; y < height; y++) {
+    const lat = n - ((y + 0.5) / height) * spanLat; // pixel y grows downward
+    for (let x = 0; x < width; x++) {
+      const lon = w + ((x + 0.5) / width) * spanLon;
+      const v = clamp01(valueAt(lon, lat));
+      if (v < MIN_VALUE) continue;
+      any = true;
+      const [r, g, b] = rampColor(v);
+      const o = (y * width + x) * 4;
+      data[o] = r; data[o + 1] = g; data[o + 2] = b;
+      data[o + 3] = Math.round(255 * clamp01((v - MIN_VALUE) / ALPHA_FADE));
+    }
+  }
+  return { data, width, height, bbox, empty: !any };
 }
 
 // --- Map integration (DOM/MapLibre shell) ------------------------------------
@@ -269,16 +320,15 @@ export function registerHeatmap(_api: ModdingAPI): void {
   // and re-adds it after a map recreation (both are idempotent).
 }
 
-export function updateHeatmap(api: ModdingAPI, fc: HeatFeatureCollection): void {
+export function updateHeatmap(api: ModdingAPI, raster: FieldRaster): void {
   const rawMap = api.utils.getMap();
   if (!rawMap) return;
   installMapErrorGuard(rawMap);
   // An empty field has no bounds — feeding MapLibre a zero-area image makes
   // setCoordinates compute z = log2(size/0) = Infinity ("outside of bounds").
   // Leave any prior image in place; the caller hides the layer for empty fields.
-  if (fc.features.length === 0) return;
+  if (raster.empty) return;
   const map = rawMap as unknown as MapLike;
-  const raster = rasterizeField(fc.features);
   const canvas = document.createElement('canvas');
   canvas.width = raster.width;
   canvas.height = raster.height;

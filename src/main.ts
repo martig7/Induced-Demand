@@ -56,7 +56,8 @@ import { buildWaterIndex, type WaterIndex, type OceanDepthFile } from './game/wa
 import { recreateMaterializedPoints } from './model/ledger';
 import { createPerfTracker, PERF_BUDGETS } from './model/perf';
 import {
-  registerHeatmap, updateHeatmap, setHeatmapVisible, buildHeatFeatures, type HeatView,
+  registerHeatmap, updateHeatmap, setHeatmapVisible, buildHeatFeatures,
+  rasterizeField, rasterizeAccessField, type HeatView, type FieldRaster,
 } from './overlay/heatmap';
 
 const TAG = '[InducedDemand]';
@@ -527,24 +528,54 @@ if (!api) {
     }
     const heatKey = `${view}:${heatRev}`;
     if (heatKey !== lastHeatKey) { // re-bake only when content changed
-      // Pressure view: render split pressure at each cell's prospective cut
-      // location — where the next point would appear, and how close it is.
-      // APPROXIMATION: uses the raw access-weighted centroid, not findCut's
-      // validated sample (running findCut per cell per refresh would be
-      // costly) — the marker can sit slightly off the real cut, or over
-      // water when validity pushes the actual cut elsewhere.
-      const cuts = view !== 'pressure' || !f.cells ? [] : [...f.cells.entries()]
-        .filter(([id, cell]) => cell.centroid !== null && (ledger.cells?.[id] ?? 0) > 0)
-        .map(([id, cell]) => ({
-          location: [cell.centroid![0], cell.centroid![1]] as [number, number],
-          t: (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS,
-        }));
-      const fc = buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG, cuts);
-      updateHeatmap(api, fc);
-      lastHeatEmpty = fc.features.length === 0;
+      let raster: FieldRaster;
+      if (view === 'accessRes' || view === 'accessCom') {
+        // Access views: bake the CONTINUOUS field from the access index over the
+        // station catchments — so access shows everywhere it exists, including
+        // empty land near a new station (which has no demand point to render).
+        const bbox = catchmentBBox(f.opps, DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED);
+        raster = rasterizeAccessField(bbox, (lon, lat) => {
+          const a = f.accessIdx.at([lon, lat]);
+          return view === 'accessRes' ? a.res : a.com;
+        });
+      } else {
+        // Pressure view: pop pressure at points + split pressure at each cell's
+        // prospective cut location. APPROXIMATION: the cut marker uses the raw
+        // access-weighted centroid, not findCut's validated sample (findCut per
+        // cell per refresh would be costly) — it can sit slightly off, or over
+        // water when validity pushes the real cut elsewhere.
+        const cuts = !f.cells ? [] : [...f.cells.entries()]
+          .filter(([id, cell]) => cell.centroid !== null && (ledger.cells?.[id] ?? 0) > 0)
+          .map(([id, cell]) => ({
+            location: [cell.centroid![0], cell.centroid![1]] as [number, number],
+            t: (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS,
+          }));
+        raster = rasterizeField(buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG, cuts).features);
+      }
+      updateHeatmap(api, raster);
+      lastHeatEmpty = raster.empty;
       lastHeatKey = heatKey;
     }
     setHeatmapVisible(api, !lastHeatEmpty); // an empty view shows nothing, not a stale image
+  }
+
+  /** Domain bbox for the access field: the union of station catchments (+ margin). */
+  function catchmentBBox(
+    opps: StationOpportunity[],
+    catchmentM: number,
+  ): [number, number, number, number] {
+    if (opps.length === 0) return [0, 0, 0, 0];
+    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+    for (const o of opps) {
+      if (o.coords[0] < w) w = o.coords[0];
+      if (o.coords[0] > e) e = o.coords[0];
+      if (o.coords[1] < s) s = o.coords[1];
+      if (o.coords[1] > n) n = o.coords[1];
+    }
+    const midLat = (s + n) / 2;
+    const padLat = catchmentM / 111194.9;
+    const padLon = catchmentM / (111194.9 * Math.max(0.05, Math.cos((midLat * Math.PI) / 180)));
+    return [w - padLon, s - padLat, e + padLon, n + padLat];
   }
 
   /**

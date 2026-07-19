@@ -128,3 +128,25 @@ test('access views ignore cuts; negligible cut pressure dropped', () => {
   const pressureFc = buildHeatFeatures(sites, newLedger(), 'pressure', DEFAULT_CONFIG, cuts);
   assert.equal(pressureFc.features.filter((f) => f.properties.id.startsWith('cut:')).length, 1);
 });
+
+// --- continuous access field -------------------------------------------------
+
+import { rasterizeAccessField } from './heatmap';
+
+test('rasterizeAccessField: paints the continuous field where access is positive', () => {
+  // High access only in the eastern half of the bbox → west transparent, east hot.
+  const r = rasterizeAccessField([0, 0, 1, 1], (lon) => (lon > 0.5 ? 0.9 : 0), { gridMax: 20 });
+  assert.equal(r.empty, false);
+  const px = (fx: number, fy: number) => {
+    const x = Math.floor(fx * r.width), y = Math.floor(fy * r.height);
+    return r.data[(y * r.width + x) * 4 + 3]; // alpha
+  };
+  assert.ok(px(0.8, 0.5) > 200, 'east is opaque (high access)');
+  assert.equal(px(0.2, 0.5), 0, 'west is transparent (no access)');
+  assert.deepEqual(r.bbox, [0, 0, 1, 1]); // domain is honored exactly (no kernel padding)
+});
+
+test('rasterizeAccessField: all-zero field is empty; degenerate bbox is empty', () => {
+  assert.equal(rasterizeAccessField([0, 0, 1, 1], () => 0, { gridMax: 8 }).empty, true);
+  assert.equal(rasterizeAccessField([0, 0, 0, 0], () => 0.9, { gridMax: 8 }).empty, true);
+});

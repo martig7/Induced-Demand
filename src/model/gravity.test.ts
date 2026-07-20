@@ -26,3 +26,19 @@ test('pairByGravity returns min(pool) pairs and consumes jobs once', () => {
   const pairs = pairByGravity(['H1', 'H2'], ['W'], loc, DEFAULT_CONFIG, makeRng(1));
   assert.equal(pairs.length, 1);
 });
+
+test('pairByGravity: never pairs a point with itself (no walking self-commute)', () => {
+  // A is in both pools and is the nearest option to itself; it must pair with B, not itself.
+  const loc = new Map<string, [number, number]>([
+    ['A', [0, 0]], ['B', [0, 0.01]],
+  ]);
+  const pairs = pairByGravity(['A'], ['A', 'B'], loc, DEFAULT_CONFIG, makeRng(1));
+  assert.equal(pairs.length, 1);
+  assert.deepEqual(pairs[0], ['A', 'B']);
+});
+
+test('pairByGravity: a residence whose only job option is itself is left unpaired', () => {
+  const loc = new Map<string, [number, number]>([['A', [0, 0]]]);
+  const pairs = pairByGravity(['A'], ['A'], loc, DEFAULT_CONFIG, makeRng(1));
+  assert.equal(pairs.length, 0);
+});

@@ -80,18 +80,19 @@ export function runDay(
     capRes.set(s.id, cR);
     capJob.set(s.id, cJ);
     // Logistic growth is ∝ current, so a freshly split point (residents/jobs 0)
-    // could never grow — it would sit empty forever. Seed a materialized point's
-    // growth with one pop of latent demand (capped so we never force decay) until
-    // it has real demand; native points use their actual current. Mirrors the
-    // retired candidate-site seed.
+    // could never grow — it would sit empty forever. For materialized points,
+    // seed the growth with one pop of latent demand (capped so we never force
+    // decay) AND multiply the rate by NEW_POINT_GROWTH_BOOST so the new dot fills
+    // in over days rather than ~25. Native points use their actual current at 1×.
     const seed = (cur: number, capV: number): number =>
       isMat ? Math.max(cur, Math.min(cfg.POP_SIZE, capV)) : cur;
+    const boost = isMat ? cfg.NEW_POINT_GROWTH_BOOST : 1;
     e.resAccum = clamp(
-      e.resAccum + logisticDelta(e.baselineResidents, seed(p.residents, cR), cR, sRes, cfg),
+      e.resAccum + boost * logisticDelta(e.baselineResidents, seed(p.residents, cR), cR, sRes, cfg),
       -cfg.ACCUM_CAP, cfg.ACCUM_CAP,
     );
     e.jobAccum = clamp(
-      e.jobAccum + logisticDelta(e.baselineJobs, seed(p.jobs, cJ), cJ, sJob, cfg),
+      e.jobAccum + boost * logisticDelta(e.baselineJobs, seed(p.jobs, cJ), cJ, sJob, cfg),
       -cfg.ACCUM_CAP, cfg.ACCUM_CAP,
     );
   }
@@ -210,14 +211,9 @@ export function runDay(
       createInducedPoint(dd, pid, cut);
       if (!ledger.materialized) ledger.materialized = {};
       ledger.materialized[pid] = { location: [cut[0], cut[1]] };
-      // Seed the new point "ready to spawn a pop" so it populates within a day
-      // (via the normal pairing path — NOT raw residents, which would desync the
-      // ledger). SPLIT_SEED_ACCUM = POP_SIZE for fast in-game verification; lower
-      // it for a more gradual fill-in.
-      ledger.points[pid] = {
-        baselineResidents: 0, baselineJobs: 0,
-        resAccum: cfg.SPLIT_SEED_ACCUM, jobAccum: cfg.SPLIT_SEED_ACCUM,
-      };
+      // Starts empty; it earns its pops naturally over the next days (boosted by
+      // NEW_POINT_GROWTH_BOOST in section A), rather than from an artificial seed.
+      ledger.points[pid] = { baselineResidents: 0, baselineJobs: 0, resAccum: 0, jobAccum: 0 };
       ledger.cells[cell.id] -= cfg.TARGET_SPLIT_DAYS;
       if (ledger.cells[cell.id] === 0) delete ledger.cells[cell.id];
       newPoints++;

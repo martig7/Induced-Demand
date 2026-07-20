@@ -76,11 +76,11 @@ export interface InducedDemandConfig {
   /** Hard ceiling on the calibrated split budget (safety). */
   MAX_SPLITS_PER_DAY: number;
   /**
-   * Growth-accumulator seed a freshly split point starts with, so it spawns its
-   * first pop quickly instead of accruing from zero. POP_SIZE ⇒ a pop within a
-   * day (fast in-game verification); lower for a gradual fill-in.
+   * Growth-rate multiplier for materialized (split) points, so a new dot fills
+   * in naturally but faster than a native point — it earns its pops over days
+   * instead of instantly, without an artificial demand seed. 1 = same as native.
    */
-  SPLIT_SEED_ACCUM: number;
+  NEW_POINT_GROWTH_BOOST: number;
 }
 
 export const DEFAULT_CONFIG: InducedDemandConfig = {
@@ -114,5 +114,5 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   TARGET_SPLIT_DAYS: 30,
   GROWTH_SHARE: 0.1,
   MAX_SPLITS_PER_DAY: 12,
-  SPLIT_SEED_ACCUM: 200, // == POP_SIZE: a freshly split point gets a pop within a day
+  NEW_POINT_GROWTH_BOOST: 5, // split dots fill in ~5x faster than a native point
 };

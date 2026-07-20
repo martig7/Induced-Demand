@@ -47,7 +47,9 @@ import {
 import {
   fitDensity, massAt, spacingAt, supportedDensityAt, type DensityFit, type FitInputPoint,
 } from './model/densityFit';
-import { integrateCells, findCut, type CellIntegral, type LatticeDeps } from './model/lattice';
+import {
+  integrateCells, findCut, createAnchorIndex, type CellIntegral, type LatticeDeps,
+} from './model/lattice';
 import {
   buildPointSites, refreshSiteAccess, computeStructuralHash, computeServiceHash,
   type Site,
@@ -537,6 +539,21 @@ if (!api) {
         raster = rasterizeAccessField(bbox, (lon, lat) => {
           const a = f.accessIdx.at([lon, lat]);
           return view === 'accessRes' ? a.res : a.com;
+        });
+      } else if (view === 'cells') {
+        // Cells view: each Voronoi cell (nearest-anchor region) flat-colored by
+        // its split pressure, normalized to the threshold — you see the exact
+        // tessellation and which cells are close to spawning a point. Zero-
+        // pressure cells stay transparent; the glow's edge IS the cell boundary.
+        const ddNow = api.gameState.getDemandData();
+        const anchorIndex = createAnchorIndex(
+          [...(ddNow?.points.values() ?? [])].map((p) => ({ id: p.id, location: p.location })),
+        );
+        const bbox = catchmentBBox(f.opps, DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED);
+        raster = rasterizeAccessField(bbox, (lon, lat) => {
+          const anchor = anchorIndex.nearest([lon, lat]);
+          if (!anchor) return 0;
+          return (ledger.cells?.[anchor.id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS;
         });
       } else {
         // Pressure view: pop pressure at points + split pressure at each cell's

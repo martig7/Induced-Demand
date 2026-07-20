@@ -22,7 +22,7 @@ import { RAMP_LOW, RAMP_MID, RAMP_HIGH } from './overlay';
 export const HEAT_SOURCE_ID = 'induced-demand-heat-source';
 export const HEAT_LAYER_ID = 'induced-demand-heatmap';
 
-export type HeatView = 'off' | 'accessRes' | 'accessCom' | 'pressure';
+export type HeatView = 'off' | 'accessRes' | 'accessCom' | 'pressure' | 'cells';
 
 export interface HeatFeature {
   type: 'Feature';

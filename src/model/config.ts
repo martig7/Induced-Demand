@@ -75,6 +75,12 @@ export interface InducedDemandConfig {
   GROWTH_SHARE: number;
   /** Hard ceiling on the calibrated split budget (safety). */
   MAX_SPLITS_PER_DAY: number;
+  /**
+   * Growth-accumulator seed a freshly split point starts with, so it spawns its
+   * first pop quickly instead of accruing from zero. POP_SIZE ⇒ a pop within a
+   * day (fast in-game verification); lower for a gradual fill-in.
+   */
+  SPLIT_SEED_ACCUM: number;
 }
 
 export const DEFAULT_CONFIG: InducedDemandConfig = {
@@ -108,4 +114,5 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   TARGET_SPLIT_DAYS: 30,
   GROWTH_SHARE: 0.1,
   MAX_SPLITS_PER_DAY: 12,
+  SPLIT_SEED_ACCUM: 200, // == POP_SIZE: a freshly split point gets a pop within a day
 };

@@ -210,7 +210,14 @@ export function runDay(
       createInducedPoint(dd, pid, cut);
       if (!ledger.materialized) ledger.materialized = {};
       ledger.materialized[pid] = { location: [cut[0], cut[1]] };
-      ledger.points[pid] = { baselineResidents: 0, baselineJobs: 0, resAccum: 0, jobAccum: 0 };
+      // Seed the new point "ready to spawn a pop" so it populates within a day
+      // (via the normal pairing path — NOT raw residents, which would desync the
+      // ledger). SPLIT_SEED_ACCUM = POP_SIZE for fast in-game verification; lower
+      // it for a more gradual fill-in.
+      ledger.points[pid] = {
+        baselineResidents: 0, baselineJobs: 0,
+        resAccum: cfg.SPLIT_SEED_ACCUM, jobAccum: cfg.SPLIT_SEED_ACCUM,
+      };
       ledger.cells[cell.id] -= cfg.TARGET_SPLIT_DAYS;
       if (ledger.cells[cell.id] === 0) delete ledger.cells[cell.id];
       newPoints++;

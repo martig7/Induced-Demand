@@ -116,7 +116,7 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   RES_SHARE: 0.5,
   JOB_SHARE: 0.5,
   LATTICE_M: 250,
-  TARGET_SPLIT_DAYS: 30,
+  TARGET_SPLIT_DAYS: 10,
   GROWTH_SHARE: 0.1,
   MAX_SPLITS_PER_DAY: 12,
   NEW_POINT_GROWTH_BOOST: 5, // split dots fill in ~5x faster than a native point

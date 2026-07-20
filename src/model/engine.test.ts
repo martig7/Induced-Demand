@@ -201,12 +201,12 @@ test('runDay deltas contain only touched points', () => {
 
 // --- Voronoi subdivision: the split step (spec 2026-07-18) -------------------
 
-test('split: dimensionless pressure (relDeficit × fill) reaches TARGET_SPLIT_DAYS and splits', () => {
+test('split: pressure (excess × fill) reaches TARGET_SPLIT_DAYS and splits', () => {
   const dd = makeDD([point('n1', 0, 0, 1000, 1000)]);
   const ledger = newLedger();
   const sites = [siteOf(dd.points.get('n1')!, 0.8)];
-  // Huge supported mass (relDeficit≈1) + full-ish anchor (fill≈0.7) accrues
-  // ~0.7/day; a 0.5-day target crosses in one day.
+  // Huge supported mass vs a small anchor cap → large excess; a full-ish anchor
+  // (fill≈0.7) crosses even a 0.5-day target in one day.
   const cfgFast = { ...DEFAULT_CONFIG, TARGET_SPLIT_DAYS: 0.5 };
   const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
   const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
@@ -218,6 +218,26 @@ test('split: dimensionless pressure (relDeficit × fill) reaches TARGET_SPLIT_DA
   assert.deepEqual(dd.points.get(pid)!.location, [0.01, 0]);
   assert.ok(ledger.materialized?.[pid]);
   assert.equal(ledger.points[pid].baselineResidents, 0);
+});
+
+test('split: a larger cell accrues more split pressure per day than a smaller one', () => {
+  // Two identical anchors (same cap, same fill), differing only in cell size
+  // (supportedMass). One in-game day; assert the bigger cell built more pressure.
+  const big = makeDD([point('n1', 0, 0, 1000, 1000)]);
+  const small = makeDD([point('n1', 0, 0, 1000, 1000)]);
+  const cells = (mass: number) =>
+    new Map([['n1', { supportedMass: mass, centroid: [0.01, 0] as [number, number] }]]);
+  const run = (dd: ReturnType<typeof makeDD>, mass: number) => {
+    const ledger = newLedger();
+    // No split (findCut null) so the day's accrual stays in ledger.cells.
+    runDay(dd, [siteOf(dd.points.get('n1')!, 0.8)], ledger, DEFAULT_CONFIG, makeRng(1), {
+      massAt: () => 2000, cells: cells(mass), findCut: () => null,
+    });
+    return ledger.cells?.n1 ?? 0;
+  };
+  const pBig = run(big, 1e6);
+  const pSmall = run(small, 5000);
+  assert.ok(pBig > pSmall, `big cell ${pBig} > small cell ${pSmall}`);
 });
 
 test('split: an empty anchor (fill 0) never accrues pressure regardless of deficit', () => {

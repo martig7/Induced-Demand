@@ -158,13 +158,15 @@ export function runDay(
     }
   }
 
-  // D. Voronoi subdivision (spec 2026-07-18): split pressure is DIMENSIONLESS —
-  // each day a cell accrues (deficit / supportedMass) × fill, i.e. its relative
-  // under-supply (0..1) scaled by how full its anchor is (0..1). Pressure is
-  // therefore in DAYS: a maximally-starved, fully-filled cell splits in
-  // TARGET_SPLIT_DAYS. This is city-independent by construction — Tokyo and
-  // Denver use the same number even though their absolute masses differ, and
-  // persisted pressures stay meaningful across recalibration.
+  // D. Voronoi subdivision (spec 2026-07-18): split pressure accrues in DAYS,
+  // scaled by how UNDER-SUBDIVIDED a cell is. Each day a cell adds
+  // `excess × fill`, where excess = supportedMass/capTotal − 1 is how many EXTRA
+  // anchor-loads the cell supports beyond its single anchor (unbounded), and
+  // fill (0..1) is how full that anchor is. So a big cell — a new station's
+  // catchment whose nearest anchor is far, supporting many anchor-loads — reaches
+  // the TARGET_SPLIT_DAYS threshold in ~a day, while a right-sized dense cell
+  // (excess ≈ 0) barely accrues and densifies via pop growth instead. Still
+  // city-independent (excess is a ratio) and persisted pressures stay in days.
   let newPoints = 0;
   if (deps.cells) {
     if (!ledger.cells) ledger.cells = {};
@@ -178,9 +180,9 @@ export function runDay(
       if (!p || !integral.centroid || integral.supportedMass <= 0) continue;
       const capTotal = (capRes.get(id) ?? 0) + (capJob.get(id) ?? 0);
       if (capTotal <= 0) continue;
-      const relDeficit = Math.max(0, 1 - capTotal / integral.supportedMass); // 0..1
+      const excess = Math.max(0, integral.supportedMass / capTotal - 1); // extra anchor-loads, 0..∞
       const fill = Math.min(1, Math.max(0, (p.residents + p.jobs) / capTotal)); // 0..1
-      const next = Math.min(cfg.TARGET_SPLIT_DAYS, (ledger.cells[id] ?? 0) + relDeficit * fill);
+      const next = Math.min(cfg.TARGET_SPLIT_DAYS, (ledger.cells[id] ?? 0) + excess * fill);
       if (next !== 0) ledger.cells[id] = next; else delete ledger.cells[id];
       if (next >= cfg.TARGET_SPLIT_DAYS) ready.push({ id, pressure: next, centroid: integral.centroid });
     }

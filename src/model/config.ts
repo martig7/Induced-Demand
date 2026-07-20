@@ -59,9 +59,12 @@ export interface InducedDemandConfig {
   /** Lattice sample pitch (m) for cell integration. */
   LATTICE_M: number;
   /**
-   * Days a maximally-starved, fully-filled cell takes to split. Split pressure
-   * is dimensionless — (deficit/supportedMass)×fill per day, 0..1 — so this
-   * constant means the same thing in every city (city-independent by design).
+   * Split-pressure threshold (in days). A cell accrues `excess × fill` per day,
+   * where excess = supportedMass/capTotal − 1 (extra anchor-loads it supports).
+   * So a large, under-subdivided cell (a new station's catchment) crosses this
+   * in ~a day, while a right-sized dense cell (excess ≈ 0) barely accrues.
+   * A cell at excess·fill = 1 splits in exactly TARGET_SPLIT_DAYS days.
+   * City-independent (excess is a ratio).
    */
   TARGET_SPLIT_DAYS: number;
   /**

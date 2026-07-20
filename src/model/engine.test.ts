@@ -220,6 +220,26 @@ test('split: pressure (excess × fill) reaches TARGET_SPLIT_DAYS and splits', ()
   assert.equal(ledger.points[pid].baselineResidents, 0);
 });
 
+test('materialized point bootstraps: an empty split point accrues growth and gets a pop', () => {
+  // A materialized point (residents/jobs 0) plus a native partner to pair with.
+  const dd = makeDD([point('n1', 0, 0, 500, 500)]);
+  const mat = point('induced-pt:0', 0.003, 0.003, 0, 0);
+  dd.points.set(mat.id, mat);
+  const ledger = newLedger();
+  ledger.materialized = { 'induced-pt:0': { location: [0.003, 0.003] } };
+  const sites = [siteOf(dd.points.get('n1')!, 0.8), siteOf(mat, 0.8)];
+  // Run several days; without the bootstrap seed the empty point never grows.
+  let gotPop = false;
+  for (let day = 0; day < 60 && !gotPop; day++) {
+    runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(day + 1), DAY_DEPS);
+    gotPop = [...dd.popsMap.values()].some(
+      (pp) => pp.residenceId === 'induced-pt:0' || pp.jobId === 'induced-pt:0',
+    );
+  }
+  assert.ok(gotPop, 'the materialized point received a pop within 60 days');
+  assert.ok((dd.points.get('induced-pt:0')!.residents + dd.points.get('induced-pt:0')!.jobs) > 0);
+});
+
 test('split: a larger cell accrues more split pressure per day than a smaller one', () => {
   // Two identical anchors (same cap, same fill), differing only in cell size
   // (supportedMass). One in-game day; assert the bigger cell built more pressure.

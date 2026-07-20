@@ -79,12 +79,19 @@ export function runDay(
     const cJ = isMat ? cfg.JOB_SHARE * deps.massAt(s.accessCom) : cap(e.baselineJobs, sJob, cfg.K_MAX);
     capRes.set(s.id, cR);
     capJob.set(s.id, cJ);
+    // Logistic growth is ∝ current, so a freshly split point (residents/jobs 0)
+    // could never grow — it would sit empty forever. Seed a materialized point's
+    // growth with one pop of latent demand (capped so we never force decay) until
+    // it has real demand; native points use their actual current. Mirrors the
+    // retired candidate-site seed.
+    const seed = (cur: number, capV: number): number =>
+      isMat ? Math.max(cur, Math.min(cfg.POP_SIZE, capV)) : cur;
     e.resAccum = clamp(
-      e.resAccum + logisticDelta(e.baselineResidents, p.residents, cR, sRes, cfg),
+      e.resAccum + logisticDelta(e.baselineResidents, seed(p.residents, cR), cR, sRes, cfg),
       -cfg.ACCUM_CAP, cfg.ACCUM_CAP,
     );
     e.jobAccum = clamp(
-      e.jobAccum + logisticDelta(e.baselineJobs, p.jobs, cJ, sJob, cfg),
+      e.jobAccum + logisticDelta(e.baselineJobs, seed(p.jobs, cJ), cJ, sJob, cfg),
       -cfg.ACCUM_CAP, cfg.ACCUM_CAP,
     );
   }

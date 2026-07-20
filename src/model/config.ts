@@ -86,13 +86,18 @@ export interface InducedDemandConfig {
 export const DEFAULT_CONFIG: InducedDemandConfig = {
   POP_SIZE: 200,
   K_MAX: 1.0,
-  R_GROW: 0.1,
+  R_GROW: 0.15,
   R_DECAY: 0.04,
   RECONCILE: 'average',
   ACCUM_CAP: 1000,
   CATCHMENT_SECONDS: 1800,
   TAU_ACCESS: 600,
-  ACCESS_CONN_FLOOR: 0.5,
+  // 0.2 (not 0.5): a zero-opportunity station still bootstraps greenfield access
+  // above MIN_SITE_ACCESS, but lands in the LOW-access density bins — so empty
+  // terrain targets sparse (foothill-scale) density, not mid-city, and the field
+  // shows a real opportunity gradient instead of looking uniform (see Fable
+  // analysis 2026-07-19). Lower access also slows growth, hence R_GROW +50%.
+  ACCESS_CONN_FLOOR: 0.2,
   WALK_SPEED: 1.0,
   BETA: 2.0,
   DIST_MIN: 100,

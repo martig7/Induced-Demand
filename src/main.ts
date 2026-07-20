@@ -59,7 +59,7 @@ import { recreateMaterializedPoints } from './model/ledger';
 import { createPerfTracker, PERF_BUDGETS } from './model/perf';
 import {
   registerHeatmap, updateHeatmap, setHeatmapVisible, buildHeatFeatures,
-  rasterizeField, rasterizeAccessField, type HeatView, type FieldRaster,
+  rasterizeField, rasterizeAccessField, rasterizeCellField, type HeatView, type FieldRaster,
 } from './overlay/heatmap';
 
 const TAG = '[InducedDemand]';
@@ -541,19 +541,22 @@ if (!api) {
           return view === 'accessRes' ? a.res : a.com;
         });
       } else if (view === 'cells') {
-        // Cells view: each Voronoi cell (nearest-anchor region) flat-colored by
-        // its split pressure, normalized to the threshold — you see the exact
-        // tessellation and which cells are close to spawning a point. Zero-
-        // pressure cells stay transparent; the glow's edge IS the cell boundary.
+        // Cells view: the FULL nearest-anchor tessellation within the transit
+        // footprint, each cell colored by its split pressure / threshold (hot =
+        // about to spawn a point). Every in-access cell is drawn (a zero-pressure
+        // cell shows faint, not as a hole); only genuine open space — no access —
+        // is transparent, matching where split pressure can actually accrue.
         const ddNow = api.gameState.getDemandData();
         const anchorIndex = createAnchorIndex(
           [...(ddNow?.points.values() ?? [])].map((p) => ({ id: p.id, location: p.location })),
         );
         const bbox = catchmentBBox(f.opps, DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED);
-        raster = rasterizeAccessField(bbox, (lon, lat) => {
+        raster = rasterizeCellField(bbox, (lon, lat) => {
+          const a = f.accessIdx.at([lon, lat]);
+          if (Math.max(a.res, a.com) < DEFAULT_CONFIG.MIN_SITE_ACCESS) return { inDomain: false, t: 0 };
           const anchor = anchorIndex.nearest([lon, lat]);
-          if (!anchor) return 0;
-          return (ledger.cells?.[anchor.id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS;
+          const pressure = anchor ? (ledger.cells?.[anchor.id] ?? 0) : 0;
+          return { inDomain: true, t: pressure / DEFAULT_CONFIG.TARGET_SPLIT_DAYS };
         });
       } else {
         // Pressure view: pop pressure at points + split pressure at each cell's

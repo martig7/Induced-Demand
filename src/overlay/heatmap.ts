@@ -267,6 +267,50 @@ export function rasterizeAccessField(
   return { data, width, height, bbox, empty: !any };
 }
 
+/** Faint tint every in-domain cell gets, so a 0-pressure cell reads as "cell, low" not a hole. */
+const CELL_BASELINE_ALPHA = 70;
+
+/**
+ * Bake the Cells view: the FULL nearest-anchor tessellation within the transit
+ * footprint. `at` returns `{ inDomain, t }` — transparent only where there is no
+ * access at all (genuine open space), otherwise every cell is drawn (cold→hot by
+ * split pressure `t`) with a baseline alpha so a zero-pressure cell shows as a
+ * faint region rather than vanishing into a confusing hole.
+ */
+export function rasterizeCellField(
+  bbox: [number, number, number, number],
+  at: (lon: number, lat: number) => { inDomain: boolean; t: number },
+  opts: { gridMax?: number } = {},
+): FieldRaster {
+  const gridMax = opts.gridMax ?? ACCESS_GRID_MAX;
+  const [w, s, e, n] = bbox;
+  const spanLon = e - w, spanLat = n - s;
+  if (spanLon <= 0 || spanLat <= 0) return EMPTY_RASTER;
+  const midLat = (s + n) / 2;
+  const mPerLon = M_PER_DEG_LAT * Math.max(0.05, Math.cos((midLat * Math.PI) / 180));
+  const aspect = (spanLon * mPerLon) / (spanLat * M_PER_DEG_LAT);
+  const width = aspect >= 1 ? gridMax : Math.max(1, Math.round(gridMax * aspect));
+  const height = aspect >= 1 ? Math.max(1, Math.round(gridMax / aspect)) : gridMax;
+
+  const data = new Uint8ClampedArray(width * height * 4);
+  let any = false;
+  for (let y = 0; y < height; y++) {
+    const lat = n - ((y + 0.5) / height) * spanLat;
+    for (let x = 0; x < width; x++) {
+      const lon = w + ((x + 0.5) / width) * spanLon;
+      const { inDomain, t: rawT } = at(lon, lat);
+      if (!inDomain) continue; // genuine open space (no access) → transparent
+      any = true;
+      const t = clamp01(rawT);
+      const [r, g, b] = rampColor(t);
+      const o = (y * width + x) * 4;
+      data[o] = r; data[o + 1] = g; data[o + 2] = b;
+      data[o + 3] = Math.round(CELL_BASELINE_ALPHA + (255 - CELL_BASELINE_ALPHA) * t);
+    }
+  }
+  return { data, width, height, bbox, empty: !any };
+}
+
 // --- Map integration (DOM/MapLibre shell) ------------------------------------
 
 interface MapLike {

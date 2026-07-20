@@ -150,3 +150,26 @@ test('rasterizeAccessField: all-zero field is empty; degenerate bbox is empty', 
   assert.equal(rasterizeAccessField([0, 0, 1, 1], () => 0, { gridMax: 8 }).empty, true);
   assert.equal(rasterizeAccessField([0, 0, 0, 0], () => 0.9, { gridMax: 8 }).empty, true);
 });
+
+// --- cell field --------------------------------------------------------------
+
+import { rasterizeCellField } from './heatmap';
+
+test('rasterizeCellField: in-domain cells always render (baseline alpha), open space transparent', () => {
+  // West half in-domain with zero pressure; east half open space (out of domain).
+  const r = rasterizeCellField([0, 0, 1, 1], (lon) =>
+    (lon < 0.5 ? { inDomain: true, t: 0 } : { inDomain: false, t: 0 }), { gridMax: 20 });
+  assert.equal(r.empty, false);
+  const px = (fx: number) => {
+    const x = Math.floor(fx * r.width), y = Math.floor(0.5 * r.height);
+    return r.data[(y * r.width + x) * 4 + 3];
+  };
+  assert.ok(px(0.2) > 0 && px(0.2) < 255, 'zero-pressure in-domain cell shows a faint baseline, not a hole');
+  assert.equal(px(0.8), 0, 'open space (no access) is transparent');
+});
+
+test('rasterizeCellField: higher pressure → more opaque', () => {
+  const cold = rasterizeCellField([0, 0, 1, 1], () => ({ inDomain: true, t: 0.1 }), { gridMax: 8 });
+  const hot = rasterizeCellField([0, 0, 1, 1], () => ({ inDomain: true, t: 1 }), { gridMax: 8 });
+  assert.ok(hot.data[3] > cold.data[3], `hot alpha ${hot.data[3]} > cold ${cold.data[3]}`);
+});

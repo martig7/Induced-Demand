@@ -9,16 +9,49 @@ export interface InducedDemandConfig {
   R_GROW: number;
   /** Decay rate per day when over cap (slower than growth). */
   R_DECAY: number;
+  /**
+   * Over-cap decay tolerance, as a fraction of the induced headroom (cap −
+   * baseline). Decay only fires above `cap + DECAY_TOLERANCE·(cap − baseline)`,
+   * absorbing the daily jitter of a recomputed cap without churning a pop off.
+   * Scales with headroom so it vanishes at baseline (transit removal → full
+   * revert, no residual). 0 = decay the instant current exceeds cap.
+   */
+  DECAY_TOLERANCE: number;
   /** Net-equal reconciliation rule for the daily pop count. */
   RECONCILE: ReconcileRule;
   /** Max magnitude held in an accumulator (people). */
   ACCUM_CAP: number;
   /** Walk seconds beyond which a station is out of catchment. */
   CATCHMENT_SECONDS: number;
-  /** Gaussian walk-time decay scale for access. */
+  /**
+   * Walk-time (s) at which access tapers LINEARLY to 0 — `walkProx = max(0, 1 −
+   * t/TAU_ACCESS)`. Set to CATCHMENT_SECONDS so access spans the game's full
+   * catchment (decompile: hard 1800s straight-line cutoff, no distance decay).
+   * Lower it to concentrate access nearer stations; must be ≤ CATCHMENT_SECONDS
+   * to matter (points beyond the catchment are dropped first).
+   */
   TAU_ACCESS: number;
   /** Minimum access credit for a single-line point. */
   ACCESS_CONN_FLOOR: number;
+  /**
+   * Weight on the demand-INDEPENDENT network-reach term in the opportunity Ô
+   * (0..1): Ô = w·reach + (1−w)·reachable-demand, per direction. `reach` is the
+   * decay-weighted fraction of the network a station reaches, so a well-connected
+   * station in a BLANK area still scores — letting new development bootstrap
+   * where transit is good but demand hasn't arrived yet (without it, Ô is pinned
+   * low in empty areas and their caps never lift). 0.5 = equal with demand.
+   */
+  ACCESS_TRANSIT_WEIGHT: number;
+  /**
+   * Job AGGLOMERATION: the commercial (job) score is multiplied by
+   * `1 + AGGLOM_STRENGTH·jobDensity`, where jobDensity ∈ [0,1] is the normalized
+   * local job mass within AGGLOM_RADIUS_M. Job-dense land scores higher → grows
+   * more jobs → a few clusters run away instead of jobs spreading evenly (the
+   * agglomeration economics that make downtowns). 0 = off; 2 = up to 3× in cores.
+   */
+  AGGLOM_STRENGTH: number;
+  /** Neighborhood radius (m) for the local job-density agglomeration term. */
+  AGGLOM_RADIUS_M: number;
   /** Walking speed (m/s) for access walk-time. */
   WALK_SPEED: number;
   /** Gravity distance-decay exponent. */
@@ -60,9 +93,24 @@ export interface InducedDemandConfig {
   /** City-wide people-mass quantile that clamps the mass curve (envelope). */
   ENVELOPE_QUANTILE: number;
   // --- Materialized-point caps ---
-  /** Residential / job share of a materialized point's access-derived mass cap. */
-  RES_SHARE: number;
-  JOB_SHARE: number;
+  /**
+   * How much a materialized point's cap DRAW is biased by its access (0..1). The
+   * draw quantile is `bias·access + (1−bias)·hash(id)`: at 0 the size is a pure
+   * per-point hash (large caps scatter to any access); at 1 it's purely access
+   * (all high-access points max out, no spread). Between, high-access points lean
+   * toward the tail (large centers) while randomness keeps a spread — so the few
+   * large draws concentrate where access is high (jobs where accessCom reaches
+   * residents), not on low-access edges.
+   */
+  SPLIT_CAP_ACCESS_BIAS: number;
+  /**
+   * Lower edge of the quantile bracket [SPLIT_CAP_QUANTILE_FLOOR, 1] a
+   * materialized point's cap is drawn from. Lowered from the original 0.5 to
+   * compensate for SPLIT_CAP_ACCESS_BIAS: with access now steering the draw, a
+   * low-access point should be able to land genuinely small (below the native
+   * median) rather than being floored at it. Higher → all new areas stay dense.
+   */
+  SPLIT_CAP_QUANTILE_FLOOR: number;
   // --- Voronoi subdivision (spec 2026-07-18) ---
   /** Lattice sample pitch (m) for cell integration. */
   LATTICE_M: number;
@@ -76,13 +124,15 @@ export interface InducedDemandConfig {
    */
   TARGET_SPLIT_DAYS: number;
   /**
-   * Fraction of the day's demand growth (N·POP_SIZE people) spent opening new
-   * locations. Calibrates the split budget to the city's growth rate — a slow
-   * town splits rarely, a booming metropolis proportionally more.
+   * Split-pressure DECAY per day (in the same day-unit). Net accrual is
+   * excess·fill − SPLIT_PRESSURE_DECAY, so a cell must be SUSTAINABLY
+   * over-subdivided (excess·fill above this) to build pressure at all — marginal
+   * cells (a whisper of excess) relax back to 0 instead of slowly creeping to the
+   * threshold over hundreds of days and sticking there uncuttable. Without it,
+   * pressure only ever rises, so every cell with any positive excess eventually
+   * hatches even when it has no room for another point.
    */
-  GROWTH_SHARE: number;
-  /** Hard ceiling on the calibrated split budget (safety). */
-  MAX_SPLITS_PER_DAY: number;
+  SPLIT_PRESSURE_DECAY: number;
   /**
    * Growth-rate multiplier for materialized (split) points, so a new dot fills
    * in naturally but faster than a native point — it earns its pops over days
@@ -94,18 +144,24 @@ export interface InducedDemandConfig {
 export const DEFAULT_CONFIG: InducedDemandConfig = {
   POP_SIZE: 200,
   K_MAX: 1.0,
-  R_GROW: 0.15,
+  R_GROW: 0.05,
   R_DECAY: 0.04,
+  DECAY_TOLERANCE: 0.25,
   RECONCILE: 'average',
   ACCUM_CAP: 1000,
   CATCHMENT_SECONDS: 1800,
-  TAU_ACCESS: 600,
-  // 0.2 (not 0.5): a zero-opportunity station still bootstraps greenfield access
-  // above MIN_SITE_ACCESS, but lands in the LOW-access density bins — so empty
-  // terrain targets sparse (foothill-scale) density, not mid-city, and the field
-  // shows a real opportunity gradient instead of looking uniform (see Fable
-  // analysis 2026-07-19). Lower access also slows growth, hence R_GROW +50%.
-  ACCESS_CONN_FLOOR: 0.2,
+  TAU_ACCESS: 1800, // = CATCHMENT_SECONDS: access spans the full game catchment
+  // 0.3: a zero-opportunity station still bootstraps greenfield access above
+  // MIN_SITE_ACCESS and lands in the LOW-access density bins (empty terrain
+  // targets sparse density, and the field keeps a real opportunity gradient),
+  // but 0.2 cut induced headroom in low-opportunity areas so hard that lowering
+  // it from 0.5 dumped a large share of the city over its new caps → sustained
+  // net removal. 0.3 is the compromise: gradient preserved, re-leveling gentler.
+  // Paired with the frozen-native Ô denominator so growth no longer dilutes it.
+  ACCESS_CONN_FLOOR: 0.3,
+  ACCESS_TRANSIT_WEIGHT: 0.5,
+  AGGLOM_STRENGTH: 2,
+  AGGLOM_RADIUS_M: 800,
   WALK_SPEED: 1.0,
   BETA: 2.0,
   DIST_MIN: 100,
@@ -122,11 +178,10 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   FIT_SPACING_QUANTILE: 0.25,
   FIT_MASS_QUANTILE: 0.8,
   ENVELOPE_QUANTILE: 0.95,
-  RES_SHARE: 0.5,
-  JOB_SHARE: 0.5,
+  SPLIT_CAP_ACCESS_BIAS: 0.5,
+  SPLIT_CAP_QUANTILE_FLOOR: 0.25,
   LATTICE_M: 250,
   TARGET_SPLIT_DAYS: 10,
-  GROWTH_SHARE: 0.1,
-  MAX_SPLITS_PER_DAY: 12,
+  SPLIT_PRESSURE_DECAY: 1.0, // net accrual excess·fill − 1: needs room for ~a full extra point
   NEW_POINT_GROWTH_BOOST: 5, // split dots fill in ~5x faster than a native point
 };

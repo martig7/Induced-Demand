@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  fitDensity, spacingAt, massAt, type FitInputPoint,
+  fitDensity, spacingAt, massAt, massResAt, massJobAt, type FitInputPoint,
 } from './densityFit';
 import { DEFAULT_CONFIG } from './config';
 
@@ -30,6 +30,26 @@ test('fit: high access → tighter spacing and higher mass than low access', () 
   assert.ok(spacingAt(fit, 0.9) < spacingAt(fit, 0.1),
     `${spacingAt(fit, 0.9)} < ${spacingAt(fit, 0.1)}`);
   assert.ok(massAt(fit, 0.9) > massAt(fit, 0.1));
+});
+
+test('fit: drawn caps inherit each side\'s shape — even residents, skewed jobs; upper-half', () => {
+  // One access bin. Residents EVEN (all 1000); jobs SKEWED (95% at 200, 5% at 6000).
+  const pts: FitInputPoint[] = [];
+  for (let i = 0; i < 100; i++) {
+    pts.push({ location: [i * 0.002, 0], residents: 1000, jobs: i < 5 ? 6000 : 200, access: 0.9 });
+  }
+  const fit = fitDensity(pts, cfg);
+  const floor = cfg.SPLIT_CAP_QUANTILE_FLOOR;
+  // Even residents: every draw ≈ 1000, regardless of the per-point uniform.
+  assert.ok(Math.abs(massResAt(fit, 0.9, 0, floor) - 1000) < 1);
+  assert.ok(Math.abs(massResAt(fit, 0.9, 1, floor) - 1000) < 1);
+  // Skewed jobs: a low draw sits in the body, a high draw reaches the tail.
+  const jLow = massJobAt(fit, 0.9, 0, floor);
+  const jHigh = massJobAt(fit, 0.9, 1, floor);
+  assert.ok(jHigh > jLow * 3, `job draw spreads: high ${jHigh} ≫ low ${jLow}`);
+  // A higher qFloor never draws below a lower one (bracket floor raises the low end).
+  assert.ok(massJobAt(fit, 0.9, 0, 0.5) >= massJobAt(fit, 0.9, 0, 0.25),
+    'raising the floor lifts the low draw');
 });
 
 test('fit: spacing clamped to [R_MIN, R_MAX]', () => {

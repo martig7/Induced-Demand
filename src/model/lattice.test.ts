@@ -11,6 +11,7 @@ import {
 const DEPS: LatticeDeps = {
   accessAt: () => ({ res: 0.8, com: 0.8 }),
   isWater: () => false,
+  isAirport: () => false,
   supportedDensity: () => 1e-3,
   spacingAt: () => 300,
   minAccess: 0.05,
@@ -93,6 +94,20 @@ test('findCut: null when water or spacing exclude every sample', () => {
     anchorId: 'p1', centroid: cells.get('p1')!.centroid!, anchors: a, latticeM: 250, deps: wet,
   });
   assert.equal(cut, null);
+});
+
+test('findCut: airport excludes every sample and tallies the reason', () => {
+  const a = anchors([['p1', 0, 0]]);
+  const onAirport: LatticeDeps = { ...DEPS, isAirport: () => true };
+  const cells = integrateCells({
+    anchors: a, stations: [[0, 0]], catchmentM: 800, latticeM: 250, deps: DEPS,
+  });
+  const reject = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0 };
+  const cut = findCut({
+    anchorId: 'p1', centroid: cells.get('p1')!.centroid!, anchors: a, latticeM: 250, deps: onAirport,
+  }, reject);
+  assert.equal(cut, null);
+  assert.ok(reject.airport > 0 && reject.airport === reject.samples, 'all samples rejected as airport');
 });
 
 test('createAnchorIndex: nearer axial anchor two rings out beats a diagonal first hit', () => {

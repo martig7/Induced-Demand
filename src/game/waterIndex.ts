@@ -28,7 +28,7 @@ export interface WaterIndex {
 }
 
 /** Even-odd rule across all rings of one polygon. */
-function inPolygon(lon: number, lat: number, rings: [number, number][][]): boolean {
+export function inPolygon(lon: number, lat: number, rings: [number, number][][]): boolean {
   let inside = false;
   for (const ring of rings) {
     for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {

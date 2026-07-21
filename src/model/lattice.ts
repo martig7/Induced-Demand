@@ -19,6 +19,8 @@ const M_PER_DEG_LAT = 111194.9;
 export interface LatticeDeps {
   accessAt(c: Coordinate): DirectionalAccess;
   isWater(c: Coordinate): boolean;
+  /** Forbid materializing a point here (on an airport apron/runway). */
+  isAirport(c: Coordinate): boolean;
   /** People per m² the access level supports (densityFit.supportedDensityAt). */
   supportedDensity(access: number): number;
   /** Min distance (m) a cut must keep from every existing point. */
@@ -100,6 +102,13 @@ export interface CellIntegral {
   supportedMass: number;
   /** Access-weighted centroid of the cell, or null if it holds no samples. */
   centroid: Coordinate | null;
+  /**
+   * People a single materialized point would hold at the anchor's access
+   * (massAt = supportedDensity·spacing²). The "one point" reference the engine
+   * measures a GREENFIELD cell's supported mass against — an anchor with no
+   * native baseline cap (undeveloped land) can then split on access alone.
+   */
+  pointCap: number;
 }
 
 interface LatticeFrame {
@@ -166,7 +175,14 @@ export function integrateCells(opts: IntegrateOpts): Map<string, CellIntegral> {
     const density = deps.supportedDensity(access);
     let cell = cells.get(anchor.id);
     if (!cell) {
-      cell = { supportedMass: 0, centroid: null, wSum: 0, lonSum: 0, latSum: 0 };
+      // pointCap at the anchor's own access: massAt = supportedDensity·spacing².
+      const aAcc = deps.accessAt(anchor.location);
+      const acc = Math.max(aAcc.res, aAcc.com);
+      const sp = deps.spacingAt(acc);
+      cell = {
+        supportedMass: 0, centroid: null, pointCap: deps.supportedDensity(acc) * sp * sp,
+        wSum: 0, lonSum: 0, latSum: 0,
+      };
       cells.set(anchor.id, cell);
     }
     cell.supportedMass += density * sampleArea;
@@ -179,6 +195,7 @@ export function integrateCells(opts: IntegrateOpts): Map<string, CellIntegral> {
     out.set(id, {
       supportedMass: c.supportedMass,
       centroid: c.wSum > 0 ? [c.lonSum / c.wSum, c.latSum / c.wSum] : null,
+      pointCap: c.pointCap,
     });
   }
   return out;
@@ -190,6 +207,16 @@ export interface FindCutOpts {
   anchors: { id: string; location: Coordinate }[];
   latticeM: number;
   deps: LatticeDeps;
+}
+
+/** Per-gate rejection tally for a findCut call (diagnostic: why no sample won). */
+export interface CutRejects {
+  samples: number;  // candidate lattice samples visited
+  floor: number;    // rejected: access < minAccess
+  water: number;    // rejected: on water
+  airport: number;  // rejected: on an airport (apron/runway)
+  outCell: number;  // rejected: nearest anchor isn't this cell (search disc off the cell)
+  spacing: number;  // rejected: within spacingAt of an existing point (no room)
 }
 
 /**
@@ -204,7 +231,7 @@ export interface FindCutOpts {
  * cost beats exhaustive cell scans, and elongated starved cells shrink as
  * neighbors split.
  */
-export function findCut(opts: FindCutOpts): Coordinate | null {
+export function findCut(opts: FindCutOpts, reject?: CutRejects): Coordinate | null {
   const { deps } = opts;
   const index = createAnchorIndex(opts.anchors);
   const anchor = opts.anchors.find((a) => a.id === opts.anchorId);
@@ -220,14 +247,16 @@ export function findCut(opts: FindCutOpts): Coordinate | null {
   let best: Coordinate | null = null;
   let bestD = Infinity;
   enumerateSamples([opts.centroid], searchR, opts.latticeM, (sample) => {
+    if (reject) reject.samples++;
     const a = deps.accessAt(sample);
     const access = Math.max(a.res, a.com);
-    if (access < deps.minAccess) return;
-    if (deps.isWater(sample)) return;
-    if (index.nearest(sample)?.id !== opts.anchorId) return; // outside the cell
+    if (access < deps.minAccess) { if (reject) reject.floor++; return; }
+    if (deps.isWater(sample)) { if (reject) reject.water++; return; }
+    if (deps.isAirport(sample)) { if (reject) reject.airport++; return; }
+    if (index.nearest(sample)?.id !== opts.anchorId) { if (reject) reject.outCell++; return; } // outside the cell
     const minDist = deps.spacingAt(access);
     for (const other of index.within(sample, minDist)) {
-      if (haversine(sample, other.location) < minDist) return;
+      if (haversine(sample, other.location) < minDist) { if (reject) reject.spacing++; return; }
     }
     const d = haversine(sample, opts.centroid);
     if (d < bestD) { bestD = d; best = sample; }

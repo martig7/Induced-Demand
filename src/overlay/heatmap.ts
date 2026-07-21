@@ -237,7 +237,15 @@ export function rasterizeField(features: HeatFeature[], opts: RasterOptions = {}
 export function rasterizeAccessField(
   bbox: [number, number, number, number],
   valueAt: (lon: number, lat: number) => number,
-  opts: { gridMax?: number } = {},
+  opts: {
+    gridMax?: number;
+    /**
+     * Optional per-pixel predicate for a diagonal-HATCH fill (reads as "dashed"):
+     * the cells view uses it to mark cells that are ready but can't place a cut
+     * (saturated density), distinguishing them from solid cells about to split.
+     */
+    hatchAt?: (lon: number, lat: number) => boolean;
+  } = {},
 ): FieldRaster {
   const gridMax = opts.gridMax ?? ACCESS_GRID_MAX;
   const [w, s, e, n] = bbox;
@@ -257,6 +265,9 @@ export function rasterizeAccessField(
       const lon = w + ((x + 0.5) / width) * spanLon;
       const v = clamp01(valueAt(lon, lat));
       if (v < MIN_VALUE) continue;
+      // Hatch: drop every other 4px-wide diagonal band so the fill reads as a
+      // dashed/striped region instead of solid (uncuttable ready cells).
+      if (opts.hatchAt?.(lon, lat) && (((x + y) >> 2) & 1) === 0) continue;
       any = true;
       const [r, g, b] = rampColor(v);
       const o = (y * width + x) * 4;

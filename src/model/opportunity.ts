@@ -113,9 +113,9 @@ export function stationMasses(
 export interface StationOpportunity {
   stationId: string;
   coords: Coordinate;
-  /** Normalized reachable-jobs mass in [0,1] — feeds RESIDENTIAL access. */
+  /** Opportunity in [0,1] feeding RESIDENTIAL access: w·network-reach + (1−w)·reachable-jobs. */
   oJobs: number;
-  /** Normalized reachable-residents mass in [0,1] — feeds COMMERCIAL access. */
+  /** Opportunity in [0,1] feeding COMMERCIAL access: w·network-reach + (1−w)·reachable-residents. */
   oRes: number;
 }
 
@@ -123,26 +123,48 @@ export function computeOpportunities(
   g: StationGraph,
   masses: Map<string, StationMass>,
   cfg: InducedDemandConfig,
+  /**
+   * Normalization reference for Ô. When omitted, the live `masses` totals are
+   * used (self-normalizing). Pass the FROZEN native-city totals to stop induced
+   * growth from inflating the denominator — otherwise every added pop dilutes
+   * every station's Ô, steps caps down, and re-fires removals citywide. The
+   * numerator stays live (current reachable mass), so growth you can reach still
+   * RAISES your Ô (clamped at 1); it just no longer taxes everyone else.
+   */
+  totals?: { res: number; jobs: number },
 ): StationOpportunity[] {
   let totalRes = 0, totalJobs = 0;
-  for (const m of masses.values()) { totalRes += m.res; totalJobs += m.jobs; }
+  if (totals) {
+    totalRes = totals.res; totalJobs = totals.jobs;
+  } else {
+    for (const m of masses.values()) { totalRes += m.res; totalJobs += m.jobs; }
+  }
+  const N = g.stationIds.length;
+  const w = cfg.ACCESS_TRANSIT_WEIGHT;
   const out: StationOpportunity[] = [];
-  for (let i = 0; i < g.stationIds.length; i++) {
+  for (let i = 0; i < N; i++) {
     const t = dijkstraStreetTimes(g, i);
-    let oJobs = 0, oRes = 0;
-    for (let j = 0; j < g.stationIds.length; j++) {
+    let oJobs = 0, oRes = 0, reach = 0;
+    for (let j = 0; j < N; j++) {
       if (!Number.isFinite(t[j])) continue;
+      const decay = Math.exp(-t[j] / cfg.TAU_REACH);
+      reach += decay; // demand-independent: every reachable station counts, mass or not
       const m = masses.get(g.stationIds[j]);
       if (!m) continue;
-      const decay = Math.exp(-t[j] / cfg.TAU_REACH);
       oJobs += m.jobs * decay;
       oRes += m.res * decay;
     }
+    // Ô = w·network-reach + (1−w)·reachable-demand. reach is the decay-weighted
+    // FRACTION of the network reached (non-directional), so a well-connected
+    // blank area scores on the reach half even with no demand nearby yet.
+    const oReach = N > 0 ? Math.min(1, reach / N) : 0;
+    const oJobsD = totalJobs > 0 ? Math.min(1, oJobs / totalJobs) : 0;
+    const oResD = totalRes > 0 ? Math.min(1, oRes / totalRes) : 0;
     out.push({
       stationId: g.stationIds[i],
       coords: g.coords[i],
-      oJobs: totalJobs > 0 ? Math.min(1, oJobs / totalJobs) : 0,
-      oRes: totalRes > 0 ? Math.min(1, oRes / totalRes) : 0,
+      oJobs: w * oReach + (1 - w) * oJobsD,
+      oRes: w * oReach + (1 - w) * oResD,
     });
   }
   return out;
@@ -173,7 +195,12 @@ function accessOver(
   for (const o of opps) {
     const t = walkSeconds(loc, o.coords, cfg.WALK_SPEED);
     if (t > cfg.CATCHMENT_SECONDS) continue;
-    const prox = Math.exp(-((t / cfg.TAU_ACCESS) ** 2));
+    // walkProx tapers LINEARLY across the game's catchment (decompile: a station
+    // serves any point with straight-line walkingTime ≤ catchment, a hard cutoff
+    // with no distance decay — the falloff is walk time as a linear journey
+    // cost). Full at the station, 0 at TAU_ACCESS (= the catchment edge). The old
+    // tight Gaussian died at ~2/3 of the catchment, so access under-reached.
+    const prox = Math.max(0, 1 - t / cfg.TAU_ACCESS);
     const r = prox * (floor + (1 - floor) * o.oJobs);
     const c = prox * (floor + (1 - floor) * o.oRes);
     if (r > res) res = r;

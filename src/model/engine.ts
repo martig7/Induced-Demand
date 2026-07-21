@@ -24,17 +24,28 @@ export interface DayResult {
   removed: number;
   /** Cells split (points materialized) this day. */
   newPoints: number;
+  /** Cells at the split threshold this day (diagnostic). */
+  readyCells: number;
+  /** Ready cells that couldn't place a cut this day — findCut null (diagnostic). */
+  nullCuts: number;
   deltas: Record<string, DayDelta>;
 }
 
 /** Injected field/fit context for one day (built by main.ts from the field state). */
 export interface RunDayDeps {
-  /** People cap for a materialized point at a given access. */
-  massAt(access: number): number;
+  /**
+   * Residential / job cap for a materialized point at a given access, drawn from
+   * the native side-distribution at a stable per-point uniform `u` ∈ [0,1] — so
+   * new points inherit each side's shape (even residents, heavy-tailed jobs).
+   */
+  massResAt(access: number, u: number): number;
+  massJobAt(access: number, u: number): number;
   /** Latest lattice integrals per anchor point id; null = lattice not ready (no splits). */
   cells: Map<string, CellIntegral> | null;
   /** Valid cut location for a splitting cell, or null (cell cannot split now). */
   findCut(anchorId: string, centroid: Coordinate): Coordinate | null;
+  /** Normalized [0,1] local job density for the agglomeration boost; absent → 0. */
+  jobDensity?(c: Coordinate): number;
 }
 
 function bumpDelta(deltas: Record<string, DayDelta>, id: string, key: keyof DayDelta): void {
@@ -74,9 +85,28 @@ export function runDay(
       };
     }
     const sRes = residentialScore(p, s.accessRes);
-    const sJob = commercialScore(p, s.accessCom);
-    const cR = isMat ? cfg.RES_SHARE * deps.massAt(s.accessRes) : cap(e.baselineResidents, sRes, cfg.K_MAX);
-    const cJ = isMat ? cfg.JOB_SHARE * deps.massAt(s.accessCom) : cap(e.baselineJobs, sJob, cfg.K_MAX);
+    // Agglomeration: job-dense land is more attractive for jobs (jobs attract
+    // jobs), so a few clusters concentrate instead of jobs spreading evenly. The
+    // factor lifts the job GROWTH RATE (via sJob, both point kinds) AND the job
+    // CAP — native through sJob, materialized by scaling massJobAt below — so a
+    // split point in a job core gets a genuinely larger ceiling, not just faster
+    // fill. Residences are untouched.
+    const agglom = 1 + cfg.AGGLOM_STRENGTH * (deps.jobDensity?.(p.location) ?? 0);
+    const sJob = commercialScore(p, s.accessCom) * agglom;
+    // Materialized caps are the point's FULL physical capacity, DRAWN from the
+    // native side-distributions (shape: even residents, skewed jobs) at stable,
+    // DECORRELATED per-point uniforms, biased toward the tail where access is
+    // high. No res/job "share" multiplier: a hard per-point cap should encode the
+    // location's stable PHYSICAL capacity, not the shifting global res/job need —
+    // that balance is handled downstream by net-equal pairing and the growth
+    // budget flowing to the scarce side (weighted by the accumulators). Baking
+    // the moving need into each cap made them churn (over-cap → decay) daily.
+    const cR = isMat
+      ? deps.massResAt(s.accessRes, capDrawU(s.accessRes, `${s.pointId}#r`, cfg))
+      : cap(e.baselineResidents, sRes, cfg.K_MAX);
+    const cJ = isMat
+      ? agglom * deps.massJobAt(s.accessCom, capDrawU(s.accessCom, `${s.pointId}#j`, cfg))
+      : cap(e.baselineJobs, sJob, cfg.K_MAX);
     capRes.set(s.id, cR);
     capJob.set(s.id, cJ);
     // Logistic growth is ∝ current, so a freshly split point (residents/jobs 0)
@@ -112,15 +142,20 @@ export function runDay(
   const jp = jobWeights.reduce((a, b) => a + b, 0);
   const N = Math.floor(reconcile(rp, jp, cfg.RECONCILE) / cfg.POP_SIZE);
   if (N > 0) {
+    // FLOOR, not ceil: a pop is added only when the cap fully supports it, so a
+    // point settles at the largest POP_SIZE-multiple ≤ cap and never OVERSHOOTS.
+    // (ceil let a point with <1 pop of headroom take a whole pop, tipping it over
+    // cap, which the over-cap decay then shed — an endless add/decay churn on
+    // every point whose cap isn't a clean multiple of POP_SIZE.)
     const remCapRes = sites.map((s) => {
       const c = capRes.get(s.id) ?? 0;
       const current = s.pointId ? (dd.points.get(s.pointId)?.residents ?? 0) : 0;
-      return Math.max(0, Math.ceil((c - current) / cfg.POP_SIZE));
+      return Math.max(0, Math.floor((c - current) / cfg.POP_SIZE));
     });
     const remCapJob = sites.map((s) => {
       const c = capJob.get(s.id) ?? 0;
       const current = s.pointId ? (dd.points.get(s.pointId)?.jobs ?? 0) : 0;
-      return Math.max(0, Math.ceil((c - current) / cfg.POP_SIZE));
+      return Math.max(0, Math.floor((c - current) / cfg.POP_SIZE));
     });
     const resPool = expand(ids, allocateInteger(resWeights, N, remCapRes));
     const jobPool = expand(ids, allocateInteger(jobWeights, N, remCapJob));
@@ -176,6 +211,8 @@ export function runDay(
   // (excess ≈ 0) barely accrues and densifies via pop growth instead. Still
   // city-independent (excess is a ratio) and persisted pressures stay in days.
   let newPoints = 0;
+  let readyCells = 0;
+  let nullCuts = 0;
   if (deps.cells) {
     if (!ledger.cells) ledger.cells = {};
     // prune pressure for anchors that no longer exist
@@ -186,26 +223,44 @@ export function runDay(
     for (const [id, integral] of deps.cells) {
       const p = dd.points.get(id);
       if (!p || !integral.centroid || integral.supportedMass <= 0) continue;
-      const capTotal = (capRes.get(id) ?? 0) + (capJob.get(id) ?? 0);
-      if (capTotal <= 0) continue;
-      const excess = Math.max(0, integral.supportedMass / capTotal - 1); // extra anchor-loads, 0..∞
-      const fill = Math.min(1, Math.max(0, (p.residents + p.jobs) / capTotal)); // 0..1
-      const next = Math.min(cfg.TARGET_SPLIT_DAYS, (ledger.cells[id] ?? 0) + excess * fill);
+      // Readiness is measured against ONE materialized point's worth of mass
+      // (pointCap = massAt at the anchor's access), NOT the anchor's baseline cap.
+      // supportedMass/pointCap ≈ cell-area / spacing² = how many points the cell's
+      // area wants at the access-appropriate density, so a cell reads
+      // "over-subdivided" only when there's genuinely room for another point
+      // ≥ spacing from the existing ones — readiness ⟺ placeability. (Measuring
+      // against the baseline cap instead made low-baseline anchors in already-
+      // dense areas read a huge FALSE excess they could never place a cut for:
+      // deep-purple cells stuck at max pressure that never split. It also lets a
+      // greenfield anchor — no baseline — split on access, same formula.)
+      if (integral.pointCap <= 0) continue;
+      const excess = Math.max(0, integral.supportedMass / integral.pointCap - 1); // extra points the area wants
+      // fill = native-first gate: densify the existing anchor before spreading.
+      // Greenfield (no baseline cap) has nothing to densify, so it's ungated.
+      const nativeCap = (capRes.get(id) ?? 0) + (capJob.get(id) ?? 0);
+      const fill = nativeCap > 0 ? Math.min(1, Math.max(0, (p.residents + p.jobs) / nativeCap)) : 1; // 0..1
+      // Net accrual with decay: a cell must be SUSTAINABLY over-subdivided
+      // (excess·fill above SPLIT_PRESSURE_DECAY) to build pressure. Marginal cells
+      // relax to 0 instead of creeping to the threshold and sticking uncuttable.
+      const next = Math.max(0, Math.min(
+        cfg.TARGET_SPLIT_DAYS,
+        (ledger.cells[id] ?? 0) + excess * fill - cfg.SPLIT_PRESSURE_DECAY,
+      ));
       if (next !== 0) ledger.cells[id] = next; else delete ledger.cells[id];
       if (next >= cfg.TARGET_SPLIT_DAYS) ready.push({ id, pressure: next, centroid: integral.centroid });
     }
     ready.sort((a, b) => (b.pressure - a.pressure) || (a.id < b.id ? -1 : 1));
+    readyCells = ready.length;
 
-    // Split budget is CALIBRATED to the city: at most GROWTH_SHARE of the day's
-    // demand growth (N pops → people) is spent opening new locations, each of
-    // which opens ~a median cell's worth of supported mass. A slow-growing town
-    // splits rarely; a booming metropolis expands proportionally — no absolute
-    // per-city cap. Floored at 1 (a genuinely ready cell always gets through)
-    // and hard-capped for safety.
-    const budget = splitBudget([...deps.cells.values()], N, cfg);
-    for (const cell of ready.slice(0, budget)) {
+    // No daily split cap: every placeable ready cell splits this day. The
+    // readiness gate (excess·fill → TARGET_SPLIT_DAYS) already decides WHICH
+    // cells are over-subdivided enough to split. A cell whose cut is currently
+    // unplaceable (findCut null: no valid sample ≥ spacing from existing points,
+    // water, or an elongated cell the search disc misses) is SKIPPED — its
+    // pressure stays capped and it retries when geometry/access changes.
+    for (const cell of ready) {
       const cut = deps.findCut(cell.id, cell.centroid);
-      if (!cut) continue; // pressure stays capped; retries when geometry/access changes
+      if (!cut) { nullCuts++; continue; }
       const pid = `${INDUCED_POINT_PREFIX}${ledger.ptSeq ?? 0}`;
       ledger.ptSeq = (ledger.ptSeq ?? 0) + 1;
       createInducedPoint(dd, pid, cut);
@@ -220,27 +275,25 @@ export function runDay(
     }
   }
 
-  return { added, removed, newPoints, deltas };
+  return { added, removed, newPoints, readyCells, nullCuts, deltas };
+}
+
+/** Stable uniform in [0,1) from a string id (FNV-1a) — a point's fixed draw. */
+export function hashU(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0) / 4294967296;
 }
 
 /**
- * City-calibrated split budget for one day. `N` is the day's pop budget
- * (reconcile output); `N × POP_SIZE` is the people of demand growth available.
- * Spending at most `GROWTH_SHARE` of that on opening locations, each worth ~a
- * median cell's supported mass, gives a size-proportional split rate with no
- * absolute per-city constant. Floored at 1 so a ready cell is never starved;
- * hard-capped by MAX_SPLITS_PER_DAY. Exported for testing.
+ * Cap-draw quantile for a materialized point: blends its access with a stable
+ * per-point hash, `bias·access + (1−bias)·hash(id)`, clamped to [0,1]. Higher
+ * access leans the draw toward the tail (large cap) while the hash preserves a
+ * spread. Exported for testing.
  */
-export function splitBudget(
-  cells: { supportedMass: number }[],
-  N: number,
-  cfg: InducedDemandConfig,
-): number {
-  const masses = cells.map((c) => c.supportedMass).filter((m) => m > 0).sort((a, b) => a - b);
-  const medianMass = masses.length > 0 ? masses[Math.floor(masses.length / 2)] : 0;
-  if (medianMass <= 0) return Math.min(1, cfg.MAX_SPLITS_PER_DAY);
-  const openable = Math.floor((cfg.GROWTH_SHARE * N * cfg.POP_SIZE) / medianMass);
-  return Math.max(1, Math.min(cfg.MAX_SPLITS_PER_DAY, openable));
+export function capDrawU(access: number, id: string, cfg: InducedDemandConfig): number {
+  const bias = cfg.SPLIT_CAP_ACCESS_BIAS;
+  return clamp(bias * access + (1 - bias) * hashU(id), 0, 1);
 }
 
 /** A removed pop changes demand at BOTH endpoints — attribute it to each (before deferral). */

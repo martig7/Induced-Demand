@@ -151,3 +151,17 @@ test('rasterizeAccessField: all-zero field is empty; degenerate bbox is empty', 
   assert.equal(rasterizeAccessField([0, 0, 0, 0], () => 0.9, { gridMax: 8 }).empty, true);
 });
 
+test('rasterizeAccessField: hatchAt punches transparent diagonal stripes into a solid fill', () => {
+  const solid = rasterizeAccessField([0, 0, 1, 1], () => 0.9, { gridMax: 20 });
+  const hatched = rasterizeAccessField([0, 0, 1, 1], () => 0.9, { gridMax: 20, hatchAt: () => true });
+  const opaque = (r: ReturnType<typeof rasterizeAccessField>) => {
+    let count = 0;
+    for (let i = 3; i < r.data.length; i += 4) if (r.data[i] > 0) count++;
+    return count;
+  };
+  assert.equal(opaque(solid), solid.width * solid.height, 'solid fills every pixel');
+  const h = opaque(hatched);
+  assert.ok(h > 0 && h < opaque(solid), `hatch drops ~half the pixels (got ${h})`);
+  assert.equal(hatched.empty, false);
+});
+

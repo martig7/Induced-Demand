@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runDay, splitBudget, type RunDayDeps } from './engine';
+import { runDay, capDrawU, type RunDayDeps } from './engine';
 import { newLedger, captureBaselines, retirePendingRemovals, type LedgerState } from './ledger';
 import { isInduced } from './popFactory';
 import { makeRng } from './gravity';
@@ -28,7 +28,7 @@ function siteOf(p: DemandPoint, access = 0.8): Site {
   return { id: p.id, pointId: p.id, location: p.location, accessRes: access, accessCom: access };
 }
 const DAY_DEPS: RunDayDeps = {
-  massAt: () => 2000,
+  massResAt: () => 2000, massJobAt: () => 2000,
   cells: null,
   findCut: () => null,
 };
@@ -208,9 +208,9 @@ test('split: pressure (excess × fill) reaches TARGET_SPLIT_DAYS and splits', ()
   // Huge supported mass vs a small anchor cap → large excess; a full-ish anchor
   // (fill≈0.7) crosses even a 0.5-day target in one day.
   const cfgFast = { ...DEFAULT_CONFIG, TARGET_SPLIT_DAYS: 0.5 };
-  const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
+  const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number], pointCap: 2000 }]]);
   const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
-    massAt: () => 2000, cells, findCut: (_id, c) => c,
+    massResAt: () => 2000, massJobAt: () => 2000, cells, findCut: (_id, c) => c,
   });
   assert.equal(r.newPoints, 1);
   const pid = 'induced-pt:0';
@@ -246,12 +246,12 @@ test('split: a larger cell accrues more split pressure per day than a smaller on
   const big = makeDD([point('n1', 0, 0, 1000, 1000)]);
   const small = makeDD([point('n1', 0, 0, 1000, 1000)]);
   const cells = (mass: number) =>
-    new Map([['n1', { supportedMass: mass, centroid: [0.01, 0] as [number, number] }]]);
+    new Map([['n1', { supportedMass: mass, centroid: [0.01, 0] as [number, number], pointCap: 2000 }]]);
   const run = (dd: ReturnType<typeof makeDD>, mass: number) => {
     const ledger = newLedger();
     // No split (findCut null) so the day's accrual stays in ledger.cells.
     runDay(dd, [siteOf(dd.points.get('n1')!, 0.8)], ledger, DEFAULT_CONFIG, makeRng(1), {
-      massAt: () => 2000, cells: cells(mass), findCut: () => null,
+      massResAt: () => 2000, massJobAt: () => 2000, cells: cells(mass), findCut: () => null,
     });
     return ledger.cells?.n1 ?? 0;
   };
@@ -267,31 +267,105 @@ test('split: an empty anchor (fill 0) never accrues pressure regardless of defic
   ledger.materialized = { n1: { location: [0, 0] } };
   ledger.points.n1 = { baselineResidents: 0, baselineJobs: 0, resAccum: 0, jobAccum: 0 };
   const sites = [siteOf(dd.points.get('n1')!, 0.8)];
-  const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
+  const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number], pointCap: 2000 }]]);
   runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), {
-    massAt: () => 2000, cells, findCut: (_id, c) => c,
+    massResAt: () => 2000, massJobAt: () => 2000, cells, findCut: (_id, c) => c,
   });
   assert.equal(ledger.cells?.n1 ?? 0, 0);
 });
 
-test('split: budget floors to 1 — one split even with many ready cells, id tie-break', () => {
-  // Four cells pre-seeded at the day target: all ready, equal pressure. The
-  // calibrated budget floors to 1 (huge cells, tiny N), so exactly one splits;
-  // the pressure-desc/id-asc order picks 'a'.
+test('split: a greenfield anchor (native baseline 0) splits on access alone', () => {
+  // A NATIVE point with zero baseline — a station in undeveloped land. Its
+  // native cap is 0, so it can never grow or (formerly) split; its high-access
+  // territory sat inert. It must now split on access: measured vs pointCap with
+  // the fill gate bypassed (nothing to densify first).
+  const dd = makeDD([point('n1', 0, 0, 0, 0)]);
+  const ledger = newLedger(); // NOT materialized — a native zero-demand point
+  const sites = [siteOf(dd.points.get('n1')!, 0.8)];
+  const cfgFast = { ...DEFAULT_CONFIG, TARGET_SPLIT_DAYS: 0.5 };
+  const cells = new Map([['n1',
+    { supportedMass: 1e6, centroid: [0.01, 0] as [number, number], pointCap: 2000 }]]);
+  const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
+    massResAt: () => 2000, massJobAt: () => 2000, cells, findCut: (_id, c) => c,
+  });
+  assert.equal(r.newPoints, 1, 'greenfield cell split on access');
+  assert.ok(dd.points.get('induced-pt:0'), 'a point materialized in the empty land');
+});
+
+test('split: a right-sized cell is not ready despite a tiny anchor baseline', () => {
+  // Low-baseline anchor whose cell supports only ~one point's worth of mass
+  // (supportedMass == pointCap → area ≈ one spacing-cell, no room for another).
+  // Measured against pointCap this reads excess 0 — not ready. (Against the tiny
+  // baseline cap it read a huge false excess and pinned at max pressure forever,
+  // a deep-purple cell that could never place a cut — the bug this fixes.)
+  const dd = makeDD([point('n1', 0, 0, 10, 10)]);
+  const ledger = newLedger();
+  const sites = [siteOf(dd.points.get('n1')!, 0.8)];
+  const cells = new Map([['n1',
+    { supportedMass: 2000, centroid: [0.001, 0] as [number, number], pointCap: 2000 }]]);
+  const r = runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), {
+    massResAt: () => 2000, massJobAt: () => 2000, cells, findCut: (_id, c) => c,
+  });
+  assert.equal(r.newPoints, 0);
+  assert.equal(ledger.cells?.n1 ?? 0, 0); // no false pressure accrued
+});
+
+test('split: marginal excess decays instead of creeping to the threshold', () => {
+  // excess·fill below SPLIT_PRESSURE_DECAY (1.0) → standing pressure must FALL,
+  // so barely-over cells never slowly creep to the threshold and stick uncuttable.
+  const dd = makeDD([point('n1', 0, 0, 1000, 1000)]);
+  const ledger = newLedger();
+  ledger.cells = { n1: 5 }; // some previously-accrued pressure
+  const sites = [siteOf(dd.points.get('n1')!, 0.8)];
+  // supportedMass 3000 vs pointCap 2000 → excess 0.5; fill 2000/2800 ≈ 0.71 →
+  // excess·fill ≈ 0.36, well under the 1.0 decay.
+  const cells = new Map([['n1',
+    { supportedMass: 3000, centroid: [0.001, 0] as [number, number], pointCap: 2000 }]]);
+  const r = runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), {
+    massResAt: () => 2000, massJobAt: () => 2000, cells, findCut: (_id, c) => c,
+  });
+  assert.equal(r.newPoints, 0);
+  assert.ok((ledger.cells?.n1 ?? 0) < 5, `marginal pressure decayed (got ${ledger.cells?.n1})`);
+});
+
+test('split: drains every placeable ready cell in one day (no daily cap)', () => {
+  // Four cells ready and placeable. With no daily split cap, all four split the
+  // same day instead of the old growth-coupled one-per-day starvation.
+  const t = DEFAULT_CONFIG.TARGET_SPLIT_DAYS;
   const pts = [point('a', 0, 0, 1000, 1000), point('b', 0.1, 0, 1000, 1000),
     point('c', 0.2, 0, 1000, 1000), point('d', 0.3, 0, 1000, 1000)];
   const dd = makeDD(pts);
   const ledger = newLedger();
-  ledger.cells = { a: 30, b: 30, c: 30, d: 30 }; // == default TARGET_SPLIT_DAYS
+  ledger.cells = { a: t, b: t, c: t, d: t };
   const sites = pts.map((p) => siteOf(dd.points.get(p.id)!, 0.8));
   const cells = new Map(pts.map((p) => [p.id,
-    { supportedMass: 1e6, centroid: [p.location[0] + 0.01, 0] as [number, number] }]));
+    { supportedMass: 1e6, centroid: [p.location[0] + 0.01, 0] as [number, number], pointCap: 2000 }]));
   const r = runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), {
-    massAt: () => 2000, cells, findCut: (_id, c) => c,
+    massResAt: () => 2000, massJobAt: () => 2000, cells, findCut: (_id, c) => c,
+  });
+  assert.equal(r.newPoints, 4);
+  for (const id of ['a', 'b', 'c', 'd']) assert.equal(ledger.cells?.[id], undefined);
+});
+
+test('split: an unplaceable top cell is skipped, not blocking a splittable one', () => {
+  // Two ready cells at equal (max) pressure; budget floors to 1. The top by
+  // id-tiebreak, 'a', can't place a cut (findCut null). It must be SKIPPED so
+  // the day's one split lands on 'b' — a stuck cell can't starve the rest.
+  const pts = [point('a', 0, 0, 1000, 1000), point('b', 0.1, 0, 1000, 1000)];
+  const dd = makeDD(pts);
+  const ledger = newLedger();
+  ledger.cells = { a: 30, b: 30 };
+  const sites = pts.map((p) => siteOf(dd.points.get(p.id)!, 0.8));
+  const cells = new Map(pts.map((p) => [p.id,
+    { supportedMass: 1e6, centroid: [p.location[0] + 0.01, 0] as [number, number], pointCap: 2000 }]));
+  const r = runDay(dd, sites, ledger, DEFAULT_CONFIG, makeRng(1), {
+    massResAt: () => 2000, massJobAt: () => 2000, cells, findCut: (id, c) => (id === 'a' ? null : c), // 'a' unplaceable
   });
   assert.equal(r.newPoints, 1);
-  assert.equal(ledger.cells?.a, undefined); // 'a' split (pressure consumed → 0 → deleted)
-  assert.equal(ledger.cells?.b, DEFAULT_CONFIG.TARGET_SPLIT_DAYS); // others untouched
+  assert.equal(r.readyCells, 2);
+  assert.equal(r.nullCuts, 1);
+  assert.equal(ledger.cells?.a, DEFAULT_CONFIG.TARGET_SPLIT_DAYS); // 'a' stays capped, retries later
+  assert.equal(ledger.cells?.b, undefined); // 'b' split
 });
 
 test('split: findCut null leaves pressure capped, no point', () => {
@@ -299,20 +373,26 @@ test('split: findCut null leaves pressure capped, no point', () => {
   const ledger = newLedger();
   const sites = [siteOf(dd.points.get('n1')!, 0.8)];
   const cfgFast = { ...DEFAULT_CONFIG, TARGET_SPLIT_DAYS: 0.5 };
-  const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number] }]]);
+  const cells = new Map([['n1', { supportedMass: 1e6, centroid: [0.01, 0] as [number, number], pointCap: 2000 }]]);
   const r = runDay(dd, sites, ledger, cfgFast, makeRng(1), {
-    massAt: () => 2000, cells, findCut: () => null,
+    massResAt: () => 2000, massJobAt: () => 2000, cells, findCut: () => null,
   });
   assert.equal(r.newPoints, 0);
   assert.equal(ledger.cells?.n1, 0.5); // capped at the day target, retries later
 });
 
-test('splitBudget: scales with growth, floors at 1, hard-caps', () => {
-  const cfg = DEFAULT_CONFIG; // GROWTH_SHARE 0.1, POP_SIZE 200, MAX_SPLITS_PER_DAY 12
-  const cells = (mass: number, n = 5) => Array.from({ length: n }, () => ({ supportedMass: mass }));
-  // median mass 1000, N=200 → floor(0.1·200·200/1000) = 4
-  assert.equal(splitBudget(cells(1000), 200, cfg), 4);
-  assert.equal(splitBudget(cells(1000), 0, cfg), 1);                       // no growth → floor 1
-  assert.equal(splitBudget(cells(1000), 100000, cfg), cfg.MAX_SPLITS_PER_DAY); // hard cap
-  assert.equal(splitBudget([], 200, cfg), 1);                             // no cells → floor 1
+test('capDrawU: higher access biases the cap draw toward the tail, stays in [0,1]', () => {
+  const cfg = DEFAULT_CONFIG; // SPLIT_CAP_ACCESS_BIAS 0.5
+  // Same id (same hash) → higher access yields a higher draw quantile.
+  assert.ok(capDrawU(0.9, 'induced-pt:7#j', cfg) > capDrawU(0.1, 'induced-pt:7#j', cfg));
+  // Always clamped to [0,1].
+  for (const [a, id] of [[1, 'x'], [0, 'y'], [0.5, 'z']] as const) {
+    const u = capDrawU(a, id, cfg);
+    assert.ok(u >= 0 && u <= 1, `u=${u}`);
+  }
+  // Bias 0 → pure hash (access ignored); bias 1 → pure access.
+  const b0 = { ...cfg, SPLIT_CAP_ACCESS_BIAS: 0 };
+  assert.equal(capDrawU(0.9, 'q', b0), capDrawU(0.1, 'q', b0));
+  const b1 = { ...cfg, SPLIT_CAP_ACCESS_BIAS: 1 };
+  assert.equal(capDrawU(0.42, 'anything', b1), 0.42);
 });

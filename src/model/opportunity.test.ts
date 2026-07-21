@@ -5,6 +5,7 @@ import type { DemandPoint } from '../types/game-state';
 import { buildStationGraph } from './stationGraph';
 import {
   dijkstraStreetTimes, stationMasses, computeOpportunities, accessAt,
+  type StationOpportunity,
 } from './opportunity';
 import { DEFAULT_CONFIG } from './config';
 
@@ -69,6 +70,31 @@ test('computeOpportunities: A sees jobs through the network, B sees residents', 
   assert.ok(oA.oJobs < oB.oJobs + 1e-9);
 });
 
+test('computeOpportunities: frozen (native) totals raise Ô vs live totals', () => {
+  const g = buildStationGraph([r1], [A, B], [], cfg);
+  const masses = stationMasses([A, B], pts, cfg);
+  const live = computeOpportunities(g, masses, cfg);
+  // A smaller frozen denominator (native totals before induced growth inflated
+  // the live totals) must raise Ô — the curative effect of the freeze.
+  const nativeTotals = { res: 3000, jobs: 3000 }; // < live totals (5000 each)
+  const frozen = computeOpportunities(g, masses, cfg, nativeTotals);
+  const liveB = live.find((o) => o.stationId === 'B')!;
+  const frozenB = frozen.find((o) => o.stationId === 'B')!;
+  assert.ok(frozenB.oRes >= liveB.oRes, `frozen ${frozenB.oRes} ≥ live ${liveB.oRes}`);
+  assert.ok(frozenB.oRes > liveB.oRes || liveB.oRes === 1, 'strictly higher unless clamped');
+  for (const o of frozen) { assert.ok(o.oRes <= 1 && o.oJobs <= 1, 'still clamped at 1'); }
+});
+
+test('computeOpportunities: a well-connected station with NO demand still scores (bootstrap)', () => {
+  const g = buildStationGraph([r1], [A, B], [], cfg);
+  const opps = computeOpportunities(g, stationMasses([A, B], [], cfg), cfg); // empty city
+  const oA = opps.find((o) => o.stationId === 'A')!;
+  // The network-reach half gives positive Ô even with zero reachable demand, so a
+  // blank area on a good line can bootstrap its cap. Bounded by the reach weight.
+  assert.ok(oA.oJobs > 0 && oA.oRes > 0, `blank-but-connected scores (${oA.oJobs}, ${oA.oRes})`);
+  assert.ok(oA.oJobs <= cfg.ACCESS_TRANSIT_WEIGHT + 1e-9 && oA.oRes <= cfg.ACCESS_TRANSIT_WEIGHT + 1e-9);
+});
+
 test('accessAt: directional — near job-dense B, residential access (to jobs) dominates', () => {
   const g = buildStationGraph([r1], [A, B], [], cfg);
   const opps = computeOpportunities(g, stationMasses([A, B], pts, cfg), cfg);
@@ -77,6 +103,16 @@ test('accessAt: directional — near job-dense B, residential access (to jobs) d
   // so a location by B is more attractive for residences than for more jobs.
   assert.ok(acc.res > acc.com, `res ${acc.res} com ${acc.com}`);
   assert.ok(acc.res > 0 && acc.res <= 1);
+});
+
+test('accessAt: walkProx tapers linearly across the full catchment, 0 past the edge', () => {
+  const opp: StationOpportunity = { stationId: 'S', coords: [0, 0], oJobs: 1, oRes: 0 };
+  const at = (m: number): number => accessAt([0, m / 111320], [opp], cfg).res; // ~m metres north
+  const near = at(100), mid = at(900), edge = at(1700), outside = at(1900);
+  assert.ok(near > mid && mid > edge, `monotone taper: ${near} > ${mid} > ${edge}`);
+  assert.ok(Math.abs(mid - 0.5) < 0.02, `mid-catchment ≈ 0.5 (linear), got ${mid}`);
+  assert.ok(edge > 0 && edge < 0.15, `near-edge small but nonzero, got ${edge}`);
+  assert.equal(outside, 0, 'past the 1800 m catchment → 0');
 });
 
 test('accessAt: out of catchment → zero', () => {

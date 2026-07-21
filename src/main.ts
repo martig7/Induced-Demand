@@ -45,16 +45,20 @@ import {
   type StationOpportunity, type AccessIndex,
 } from './model/opportunity';
 import {
-  fitDensity, massAt, spacingAt, supportedDensityAt, type DensityFit, type FitInputPoint,
+  fitDensity, massResAt, massJobAt, spacingAt, supportedDensityAt,
+  type DensityFit, type FitInputPoint,
 } from './model/densityFit';
 import {
-  integrateCells, findCut, createAnchorIndex, type CellIntegral, type LatticeDeps,
+  integrateCells, findCut, createAnchorIndex,
+  type CellIntegral, type LatticeDeps, type CutRejects,
 } from './model/lattice';
 import {
   buildPointSites, refreshSiteAccess, computeStructuralHash, computeServiceHash,
   type Site,
 } from './model/field';
 import { buildWaterIndex, type WaterIndex, type OceanDepthFile } from './game/waterIndex';
+import { buildAirportIndex, type AirportIndex, type AirportFeatureCollection } from './game/airportIndex';
+import { buildJobDensity, type JobDensity } from './model/agglomeration';
 import { recreateMaterializedPoints } from './model/ledger';
 import { createPerfTracker, PERF_BUDGETS } from './model/perf';
 import {
@@ -156,6 +160,10 @@ if (!api) {
       massDrift: number;
       water: WaterIndex | null;
       waterFailed: boolean;
+      airport: AirportIndex | null;
+      airportFailed: boolean;
+      /** Local job-density field for the agglomeration score boost. */
+      jobDensity: JobDensity;
     };
   }
   const w = window as unknown as Record<string, number | boolean | undefined>;
@@ -197,6 +205,19 @@ if (!api) {
       return idx;
     } catch (e) {
       console.warn(`${TAG} no ocean_depth_index for ${city} — placing without a water mask`, e);
+      return null;
+    }
+  }
+
+  /** Airport index (apron/runway polygons) — one load attempt per city; null = no mask. */
+  async function loadAirportIndex(city: string): Promise<AirportIndex | null> {
+    try {
+      const file = await loadCityJson<AirportFeatureCollection>(
+        window as unknown as DataServerHost, `/data/${city}/runways_taxiways.geojson`,
+      );
+      return buildAirportIndex(file);
+    } catch (e) {
+      console.warn(`${TAG} no runways_taxiways for ${city} — placing without an airport mask`, e);
       return null;
     }
   }
@@ -287,14 +308,41 @@ if (!api) {
     });
   }
 
-  /** Live routes only — in-progress (temp-parent) routes do not induce demand. */
+  /**
+   * Stations that actually induce demand: BUILT (constructed, not blueprint) and
+   * carrying at least one LIVE route. `includeTempRoutes: false` already strips
+   * in-progress routes from `routeIds`, so length 0 means no live route. This is
+   * the single gate — everything downstream (graph, opportunities, access index,
+   * the reach term, the field domain) derives from this list, so blueprint and
+   * routeless stations never generate access, targeting, or splits.
+   */
   function inductionStations(): Station[] {
-    return api.gameState.getStations({ includeTempRoutes: false });
+    return api.gameState
+      .getStations({ includeTempRoutes: false })
+      .filter((s) => s.buildType === 'constructed' && (s.routeIds?.length ?? 0) > 0);
   }
 
   /** Live routes incl. stations, for graph + hash. */
   function liveRoutes() {
     return api.gameState.getRoutes({ includeTempRoutes: false });
+  }
+
+  /**
+   * Frozen normalization reference for Ô: station-catchment totals over NATIVE
+   * baseline demand (ledger baselines; induced growth and materialized points
+   * excluded). Same station-basis as the live totals it replaces, so no scale
+   * shock — it just stops growing with induced demand.
+   */
+  function nativeMassTotals(stations: Station[], dd: DemandData): { res: number; jobs: number } {
+    const baselinePoints = [...dd.points.values()].map((p) => {
+      const e = ledger.points[p.id];
+      return e ? { ...p, residents: e.baselineResidents, jobs: e.baselineJobs } : p;
+    });
+    let res = 0, jobs = 0;
+    for (const m of stationMasses(stations, baselinePoints, DEFAULT_CONFIG).values()) {
+      res += m.res; jobs += m.jobs;
+    }
+    return { res, jobs };
   }
 
   /** Graph + opportunities + access index — the weight layer both tiers share. */
@@ -311,7 +359,16 @@ if (!api) {
     const stations = inductionStations();
     const groups = api.gameState.getStationGroups?.() ?? [];
     const graph = buildStationGraph(routes, stations, groups, DEFAULT_CONFIG);
-    const opps = computeOpportunities(graph, stationMasses(stations, dd.points.values(), DEFAULT_CONFIG), DEFAULT_CONFIG);
+    // Ô normalizes against FROZEN native-city totals (baseline demand), not the
+    // live totals: otherwise induced growth inflates the denominator and dilutes
+    // every station's access, stepping caps down and re-firing removals forever
+    // (the zero-sum flaw). Numerator stays live (current reachable mass).
+    const opps = computeOpportunities(
+      graph,
+      stationMasses(stations, dd.points.values(), DEFAULT_CONFIG),
+      DEFAULT_CONFIG,
+      nativeMassTotals(stations, dd),
+    );
     return {
       routes, stations, graph, opps,
       accessIdx: buildAccessIndex(opps, DEFAULT_CONFIG),
@@ -334,10 +391,12 @@ if (!api) {
     accessIdx: AccessIndex,
     fit: DensityFit,
     water: WaterIndex | null,
+    airport: AirportIndex | null,
   ): LatticeDeps {
     return {
       accessAt: (c) => accessIdx.at(c),
       isWater: (c) => water?.isWater(c) ?? false,
+      isAirport: (c) => airport?.isAirport(c) ?? false,
       supportedDensity: (a) => supportedDensityAt(fit, a),
       spacingAt: (a) => spacingAt(fit, a),
       minAccess: DEFAULT_CONFIG.MIN_SITE_ACCESS,
@@ -351,6 +410,7 @@ if (!api) {
     accessIdx: AccessIndex,
     fit: DensityFit,
     water: WaterIndex | null,
+    airport: AirportIndex | null,
   ): Map<string, CellIntegral> {
     return integrateCells({
       anchors: [...dd.points.values()].map((p) => ({ id: p.id, location: p.location })),
@@ -359,7 +419,7 @@ if (!api) {
         .map((s) => s.coords),
       catchmentM: DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED,
       latticeM: DEFAULT_CONFIG.LATTICE_M,
-      deps: latticeDeps(accessIdx, fit, water),
+      deps: latticeDeps(accessIdx, fit, water, airport),
     });
   }
 
@@ -387,6 +447,12 @@ if (!api) {
       water = await loadWaterIndex(city);
       waterFailed = water === null;
     }
+    let airport = session.field?.city === city ? session.field.airport : null;
+    let airportFailed = session.field?.city === city ? session.field.airportFailed : false;
+    if (!airport && !airportFailed) {
+      airport = await loadAirportIndex(city);
+      airportFailed = airport === null;
+    }
     const stale = (): boolean => gen !== fieldBuildGen || !isCurrent() || key() !== city;
     if (stale()) return;
     const yieldToLoop = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
@@ -410,7 +476,7 @@ if (!api) {
     // double-count overlapping catchment edges). ~50-100ms in one chunk: same
     // budget class as the old sampling phase, amortized by the other yields;
     // split into finer slices only if the perf line complains.
-    const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, water);
+    const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, water, airport);
     await yieldToLoop();
     if (stale()) return;
 
@@ -418,7 +484,8 @@ if (!api) {
       city, sites, cells,
       graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,
       fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
-      water, waterFailed,
+      water, waterFailed, airport, airportFailed,
+      jobDensity: buildJobDensity(dd.points.values(), DEFAULT_CONFIG),
     };
     const total = performance.now() - t0;
     perf.record('tier1', PERF_BUDGETS.tier1Total, total, `${sites.length} sites, ${cells.size} cells`);
@@ -431,18 +498,23 @@ if (!api) {
    * is a small, rare hitch (unhooked route edits only — route hooks already
    * fire the chunked path).
    */
-  function rebuildFieldSync(dd: DemandData, city: string, water: WaterIndex | null, waterFailed: boolean): void {
+  function rebuildFieldSync(
+    dd: DemandData, city: string,
+    water: WaterIndex | null, waterFailed: boolean,
+    airport: AirportIndex | null, airportFailed: boolean,
+  ): void {
     fieldBuildGen++; // cancel any in-flight chunked build; this snapshot is newer
     perf.track('tier1', PERF_BUDGETS.tier1, () => {
       const weights = computeWeights(dd);
       const fit = computeFit(dd, weights.accessIdx);
       const sites = buildPointSites(dd, (c) => weights.accessIdx.at(c));
-      const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, water);
+      const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, water, airport);
       ensureSession().field = {
         city, sites, cells,
         graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,
         fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
-        water, waterFailed,
+        water, waterFailed, airport, airportFailed,
+        jobDensity: buildJobDensity(dd.points.values(), DEFAULT_CONFIG),
       };
       return sites;
     }, (sites) => `${sites.length} sites (sync promotion)`);
@@ -469,7 +541,7 @@ if (!api) {
     }
     const routes = liveRoutes();
     if (computeStructuralHash(routes) !== f.hash) {
-      rebuildFieldSync(dd, city, f.water, f.waterFailed);
+      rebuildFieldSync(dd, city, f.water, f.waterFailed, f.airport, f.airportFailed);
       return;
     }
     let totalMass = 0;
@@ -550,10 +622,26 @@ if (!api) {
           [...(ddNow?.points.values() ?? [])].map((p) => ({ id: p.id, location: p.location })),
         );
         const bbox = catchmentBBox(f.opps, DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED);
+        // Memoize the nearest-anchor lookup so value + hatch predicate (called
+        // back-to-back per pixel) don't each pay for it.
+        let cacheLon = NaN, cacheLat = NaN, cacheId: string | null = null;
+        const anchorAt = (lon: number, lat: number): string | null => {
+          if (lon !== cacheLon || lat !== cacheLat) {
+            cacheLon = lon; cacheLat = lat; cacheId = anchorIndex.nearest([lon, lat])?.id ?? null;
+          }
+          return cacheId;
+        };
         raster = rasterizeAccessField(bbox, (lon, lat) => {
-          const anchor = anchorIndex.nearest([lon, lat]);
-          if (!anchor) return 0;
-          return (ledger.cells?.[anchor.id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS;
+          const id = anchorAt(lon, lat);
+          return id ? (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS : 0;
+        }, {
+          // Hatch (dashed) a cell that's at max pressure but survived the day's
+          // split pass — i.e. ready yet uncuttable (saturated density). Cuttable
+          // ready cells split away and drop to 0, so at-cap == uncuttable.
+          hatchAt: (lon, lat) => {
+            const id = anchorAt(lon, lat);
+            return !!id && (ledger.cells?.[id] ?? 0) >= DEFAULT_CONFIG.TARGET_SPLIT_DAYS;
+          },
         });
       } else {
         // Pressure view: pop pressure at points + split pressure at each cell's
@@ -1229,24 +1317,38 @@ if (!api) {
       console.error(`${TAG} field refresh failed`, e);
     }
     const field = wSession[SESSION_KEY]?.field;
-    let result: DayResult = { added: 0, removed: 0, newPoints: 0, deltas: {} };
+    let result: DayResult = { added: 0, removed: 0, newPoints: 0, readyCells: 0, nullCuts: 0, deltas: {} };
+    // Diagnostic: why ready cells fail to place a cut this day (per-gate tally
+    // over the FAILED cells only), surfaced in the heartbeat below.
+    const cutReject: CutRejects = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0 };
     if (field && field.city === key()) {
       try {
         result = perf.track('day', PERF_BUDGETS.day, () => runDay(
           dd, field.sites, ledger, DEFAULT_CONFIG,
           makeRng(hashSeed(currentCity(), day)),
           {
-            massAt: (a) => massAt(field.fit, a),
+            massResAt: (a, u) => massResAt(field.fit, a, u, DEFAULT_CONFIG.SPLIT_CAP_QUANTILE_FLOOR),
+            massJobAt: (a, u) => massJobAt(field.fit, a, u, DEFAULT_CONFIG.SPLIT_CAP_QUANTILE_FLOOR),
+            jobDensity: (c) => field.jobDensity.at(c),
             cells: field.cells,
             // Cut validity re-checks against the CURRENT points (splits earlier
             // in the same loop may have added anchors since the lattice pass).
-            findCut: (anchorId, centroid) => findCut({
-              anchorId,
-              centroid,
-              anchors: [...dd.points.values()].map((p) => ({ id: p.id, location: p.location })),
-              latticeM: DEFAULT_CONFIG.LATTICE_M,
-              deps: latticeDeps(field.accessIdx, field.fit, field.water),
-            }),
+            findCut: (anchorId, centroid) => {
+              const rej: CutRejects = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0 };
+              const cut = findCut({
+                anchorId,
+                centroid,
+                anchors: [...dd.points.values()].map((p) => ({ id: p.id, location: p.location })),
+                latticeM: DEFAULT_CONFIG.LATTICE_M,
+                deps: latticeDeps(field.accessIdx, field.fit, field.water, field.airport),
+              }, rej);
+              if (!cut) { // tally reasons only for cells that couldn't place
+                cutReject.samples += rej.samples; cutReject.floor += rej.floor;
+                cutReject.water += rej.water; cutReject.outCell += rej.outCell;
+                cutReject.spacing += rej.spacing;
+              }
+              return cut;
+            },
           },
           liveSlotSet(), drivingModel(),
         ), (r) => `+${r.added}/-${r.removed}/${r.newPoints}pt`);
@@ -1277,9 +1379,14 @@ if (!api) {
         if (m > 0) active++;
         if (m > maxPressure) maxPressure = m;
       }
+      const cr = cutReject;
+      const rejStr = result.nullCuts > 0
+        ? ` [reject: floor ${cr.floor} water ${cr.water} airport ${cr.airport} outCell ${cr.outCell} spacing ${cr.spacing} /${cr.samples} samples]`
+        : '';
       console.log(
         `${TAG} day ${day}: ${dd.points.size} pts, ${stations.length} stations, ${active} active, ` +
-        `induced ${induced} (+${result.added} -${result.removed}), newPts ${result.newPoints}, ` +
+        `induced ${induced} (+${result.added} -${result.removed}), newPts ${result.newPoints} ` +
+        `(ready ${result.readyCells}, nullCut ${result.nullCuts})${rejStr}, ` +
         `Rp ${rp.toFixed(0)} Jp ${jp.toFixed(0)}, maxPressure ${maxPressure.toFixed(1)}/${DEFAULT_CONFIG.POP_SIZE}`,
       );
     } else if (result.added || result.removed) {

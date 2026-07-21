@@ -121,17 +121,17 @@ test('accessAt: out of catchment → zero', () => {
   assert.deepEqual(accessAt([2, 2], opps, cfg), { res: 0, com: 0 });
 });
 
-test('qualityAt: distance-independent — flat within the catchment, floor+(1−floor)·Ô', () => {
+test('opportunityAt: raw Ô — distance-independent, no floor, flat within the catchment', () => {
   const opp: StationOpportunity = { stationId: 'S', coords: [0, 0], oJobs: 0.6, oRes: 0 };
   const idx = buildAccessIndex([opp], cfg);
-  const q = cfg.ACCESS_CONN_FLOOR + (1 - cfg.ACCESS_CONN_FLOOR) * 0.6;
-  // Same value at the platform and near the catchment edge (no walkProx taper),
-  // whereas accessAt would have decayed to ~0 there.
-  assert.ok(Math.abs(idx.qualityAt([0, 0]).res - q) < 1e-9, 'quality at the platform');
-  assert.ok(Math.abs(idx.qualityAt([0, 1700 / 111320]).res - q) < 1e-9, 'same quality near the edge');
+  // Raw Ô (no floor, no walkProx): the residential side is oJobs = 0.6, the same
+  // at the platform and near the catchment edge, whereas accessAt decays to ~0.
+  assert.ok(Math.abs(idx.opportunityAt([0, 0]).res - 0.6) < 1e-9, 'raw Ô at the platform');
+  assert.ok(Math.abs(idx.opportunityAt([0, 1700 / 111320]).res - 0.6) < 1e-9, 'same near the edge');
+  assert.equal(idx.opportunityAt([0, 0]).com, 0, 'commercial side is oRes = 0, no floor added');
   assert.ok(accessAt([0, 1700 / 111320], [opp], cfg).res < 0.15, 'access itself has decayed there');
   // Outside every catchment → 0, like access.
-  assert.deepEqual(idx.qualityAt([2, 2]), { res: 0, com: 0 });
+  assert.deepEqual(idx.opportunityAt([2, 2]), { res: 0, com: 0 });
 });
 
 // --- access index equivalence ------------------------------------------------

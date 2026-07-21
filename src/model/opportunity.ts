@@ -210,27 +210,25 @@ function accessOver(
 }
 
 /**
- * The distance-INDEPENDENT part of access: the best in-catchment station's
- * `floor + (1−floor)·Ô` per side, WITHOUT the walkProx taper. Access is
- * `walkProx × quality`, so this is what's left once the proximity blob around
- * each platform is removed — a flat plateau per catchment showing the transit
- * connectivity/opportunity landscape (for the overlay only; the model uses the
- * full `accessOver`). Still gated by the catchment: outside every station's
- * reach it's 0.
+ * The best in-catchment station's raw opportunity Ô per side — the RESIDENTIAL
+ * side gets reachable-jobs (oJobs), the COMMERCIAL side reachable-residents
+ * (oRes). No walkProx taper and NO connectivity floor: access is
+ * `walkProx × (floor + (1−floor)·Ô)`, so this strips BOTH the proximity blob
+ * around each platform AND the constant 0.3 floor, leaving just the transit
+ * connectivity gradient (for the overlay only; the model uses the full
+ * `accessOver`). A flat plateau per catchment. Still catchment-gated: outside
+ * every station's reach it's 0 (transparent).
  */
-function qualityOver(
+function opportunityOver(
   loc: Coordinate,
   opps: Iterable<StationOpportunity>,
   cfg: InducedDemandConfig,
 ): DirectionalAccess {
   let res = 0, com = 0;
-  const floor = cfg.ACCESS_CONN_FLOOR;
   for (const o of opps) {
     if (walkSeconds(loc, o.coords, cfg.WALK_SPEED) > cfg.CATCHMENT_SECONDS) continue;
-    const r = floor + (1 - floor) * o.oJobs;
-    const c = floor + (1 - floor) * o.oRes;
-    if (r > res) res = r;
-    if (c > com) com = c;
+    if (o.oJobs > res) res = o.oJobs;
+    if (o.oRes > com) com = o.oRes;
   }
   return { res, com };
 }
@@ -247,11 +245,11 @@ function qualityOver(
 export interface AccessIndex {
   at(loc: Coordinate): DirectionalAccess;
   /**
-   * Distance-INDEPENDENT access (best in-catchment station quality, no walkProx)
-   * — for the overlay, so the map shows connectivity structure rather than a
-   * proximity blob around each platform. See qualityOver.
+   * Best in-catchment raw opportunity Ô per side — no walkProx, no floor. For
+   * the overlay, so the map shows the pure connectivity gradient rather than a
+   * proximity blob around each platform. See opportunityOver.
    */
-  qualityAt(loc: Coordinate): DirectionalAccess;
+  opportunityAt(loc: Coordinate): DirectionalAccess;
 }
 
 export function buildAccessIndex(
@@ -280,6 +278,6 @@ export function buildAccessIndex(
   };
   return {
     at: (loc) => accessOver(loc, nearbyOf(loc), cfg),
-    qualityAt: (loc) => qualityOver(loc, nearbyOf(loc), cfg),
+    opportunityAt: (loc) => opportunityOver(loc, nearbyOf(loc), cfg),
   };
 }

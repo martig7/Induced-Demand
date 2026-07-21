@@ -610,7 +610,10 @@ if (!api) {
         // empty land near a new station (which has no demand point to render).
         const bbox = catchmentBBox(f.opps, DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED);
         raster = rasterizeAccessField(bbox, (lon, lat) => {
-          const a = f.accessIdx.at([lon, lat]);
+          // Show the DISTANCE-INDEPENDENT part of access (station connectivity
+          // quality), not walkProx×quality — otherwise every station is just a
+          // proximity blob fading to the edge. Flat plateaus per catchment.
+          const a = f.accessIdx.qualityAt([lon, lat]);
           return view === 'accessRes' ? a.res : a.com;
         }, { contrast: true }); // normalize + gamma-lift so a low-max field still reads
       } else if (view === 'cells') {

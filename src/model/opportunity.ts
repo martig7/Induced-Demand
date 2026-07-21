@@ -210,6 +210,32 @@ function accessOver(
 }
 
 /**
+ * The distance-INDEPENDENT part of access: the best in-catchment station's
+ * `floor + (1−floor)·Ô` per side, WITHOUT the walkProx taper. Access is
+ * `walkProx × quality`, so this is what's left once the proximity blob around
+ * each platform is removed — a flat plateau per catchment showing the transit
+ * connectivity/opportunity landscape (for the overlay only; the model uses the
+ * full `accessOver`). Still gated by the catchment: outside every station's
+ * reach it's 0.
+ */
+function qualityOver(
+  loc: Coordinate,
+  opps: Iterable<StationOpportunity>,
+  cfg: InducedDemandConfig,
+): DirectionalAccess {
+  let res = 0, com = 0;
+  const floor = cfg.ACCESS_CONN_FLOOR;
+  for (const o of opps) {
+    if (walkSeconds(loc, o.coords, cfg.WALK_SPEED) > cfg.CATCHMENT_SECONDS) continue;
+    const r = floor + (1 - floor) * o.oJobs;
+    const c = floor + (1 - floor) * o.oRes;
+    if (r > res) res = r;
+    if (c > com) com = c;
+  }
+  return { res, com };
+}
+
+/**
  * Station-proximity index for access lookups. `accessAt` is O(stations) per
  * call, which multiplied across every sampler attempt of a 10k-site field
  * rebuild — the second-largest cost in the measured 161 s tier1. Stations are
@@ -220,6 +246,12 @@ function accessOver(
  */
 export interface AccessIndex {
   at(loc: Coordinate): DirectionalAccess;
+  /**
+   * Distance-INDEPENDENT access (best in-catchment station quality, no walkProx)
+   * — for the overlay, so the map shows connectivity structure rather than a
+   * proximity blob around each platform. See qualityOver.
+   */
+  qualityAt(loc: Coordinate): DirectionalAccess;
 }
 
 export function buildAccessIndex(
@@ -235,17 +267,19 @@ export function buildAccessIndex(
     const bucket = grid.get(k);
     if (bucket) bucket.push(o); else grid.set(k, [o]);
   }
-  return {
-    at(loc: Coordinate): DirectionalAccess {
-      const { cx, cy } = cellOf(loc[0], loc[1]);
-      const nearby: StationOpportunity[] = [];
-      for (let dx = -1; dx <= 1; dx++) {
-        for (let dy = -1; dy <= 1; dy++) {
-          const bucket = grid.get(`${cx + dx},${cy + dy}`);
-          if (bucket) nearby.push(...bucket);
-        }
+  const nearbyOf = (loc: Coordinate): StationOpportunity[] => {
+    const { cx, cy } = cellOf(loc[0], loc[1]);
+    const nearby: StationOpportunity[] = [];
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const bucket = grid.get(`${cx + dx},${cy + dy}`);
+        if (bucket) nearby.push(...bucket);
       }
-      return accessOver(loc, nearby, cfg);
-    },
+    }
+    return nearby;
+  };
+  return {
+    at: (loc) => accessOver(loc, nearbyOf(loc), cfg),
+    qualityAt: (loc) => qualityOver(loc, nearbyOf(loc), cfg),
   };
 }

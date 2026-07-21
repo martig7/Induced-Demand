@@ -121,17 +121,20 @@ test('accessAt: out of catchment → zero', () => {
   assert.deepEqual(accessAt([2, 2], opps, cfg), { res: 0, com: 0 });
 });
 
-test('opportunityAt: raw Ô — distance-independent, no floor, flat within the catchment', () => {
+test('accessNoFloorAt: walkProx × Ô — distance taper kept, connectivity floor dropped', () => {
   const opp: StationOpportunity = { stationId: 'S', coords: [0, 0], oJobs: 0.6, oRes: 0 };
   const idx = buildAccessIndex([opp], cfg);
-  // Raw Ô (no floor, no walkProx): the residential side is oJobs = 0.6, the same
-  // at the platform and near the catchment edge, whereas accessAt decays to ~0.
-  assert.ok(Math.abs(idx.opportunityAt([0, 0]).res - 0.6) < 1e-9, 'raw Ô at the platform');
-  assert.ok(Math.abs(idx.opportunityAt([0, 1700 / 111320]).res - 0.6) < 1e-9, 'same near the edge');
-  assert.equal(idx.opportunityAt([0, 0]).com, 0, 'commercial side is oRes = 0, no floor added');
-  assert.ok(accessAt([0, 1700 / 111320], [opp], cfg).res < 0.15, 'access itself has decayed there');
-  // Outside every catchment → 0, like access.
-  assert.deepEqual(idx.opportunityAt([2, 2]), { res: 0, com: 0 });
+  // At the platform walkProx = 1 → value is Ô itself (oJobs = 0.6), with NO floor
+  // added (the full accessAt would be floor+(1−floor)·0.6 = 0.72 there).
+  assert.ok(Math.abs(idx.accessNoFloorAt([0, 0]).res - 0.6) < 1e-9, 'platform = Ô, no floor');
+  assert.ok(accessAt([0, 0], [opp], cfg).res > 0.71, 'full access adds the floor (~0.72)');
+  // Distance taper is kept: mid-catchment ≈ 0.5·Ô, decaying toward the edge.
+  const mid = idx.accessNoFloorAt([0, 900 / 111320]).res;
+  assert.ok(Math.abs(mid - 0.5 * 0.6) < 0.02, `mid-catchment ≈ 0.3 (walkProx≈0.5·Ô), got ${mid}`);
+  assert.ok(mid < idx.accessNoFloorAt([0, 100 / 111320]).res, 'tapers with distance');
+  assert.equal(idx.accessNoFloorAt([0, 0]).com, 0, 'commercial side is oRes = 0');
+  // Outside every catchment → 0.
+  assert.deepEqual(idx.accessNoFloorAt([2, 2]), { res: 0, com: 0 });
 });
 
 // --- access index equivalence ------------------------------------------------

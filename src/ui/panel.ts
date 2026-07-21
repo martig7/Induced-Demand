@@ -21,6 +21,7 @@ export function createPanel(
   // addFloatingPanel only adds a collapsed top-bar icon — see docs/MODDING_UI.md).
   HistorySection: (() => unknown) | null = null,
   getPerf: () => string = () => '',
+  onDump: () => void = () => {},
 ): () => unknown {
   const React = api.utils.React as unknown as {
     createElement: (type: unknown, props?: unknown, ...children: unknown[]) => unknown;
@@ -102,6 +103,15 @@ export function createPanel(
       ? h('div', { style: { marginTop: '6px' } }, h(HistorySection))
       : null;
 
+    const dumpBtn = h('button', {
+      onClick: onDump,
+      style: {
+        marginTop: '10px', width: '100%', padding: '4px 8px', borderRadius: '4px',
+        cursor: 'pointer', border: '1px solid #8c96c6', background: 'transparent',
+        color: 'inherit', fontSize: '12px',
+      },
+    }, '⭳ Dump JSON (offline sim)');
+
     return h('div', { style: { padding: '8px', minWidth: '220px' } },
       row('Show', [seg('On', s.enabled, () => store.set({ enabled: true })), seg('Off', !s.enabled, () => store.set({ enabled: false }))]),
       row('View', [seg('Realized', s.view === 'realized', () => setView('realized')), seg('Targeting', s.view === 'targeting', () => setView('targeting'))]),
@@ -121,6 +131,7 @@ export function createPanel(
       historyBtn,
       ...(historySection ? [historySection] : []),
       h('div', { style: { fontSize: '10px', opacity: 0.6, marginTop: '6px' } }, getPerf() || ' '),
+      dumpBtn,
       resetBtn);
   };
 }

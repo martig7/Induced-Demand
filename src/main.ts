@@ -37,6 +37,7 @@ import {
 } from './overlay/overlay';
 import { createOverlayStore, type OverlayStore } from './overlay/state';
 import { createPanel } from './ui/panel';
+import { buildDump } from './sim/dump';
 import { createHistoryPanel } from './ui/historyPanel';
 import { TOOLBAR_PANEL_ID, TOOLBAR_PLACEMENT } from './ui/toolbarPanel';
 import { buildStationGraph, type StationGraph } from './model/stationGraph';
@@ -977,7 +978,32 @@ if (!api) {
       () => persistentUi.resetInducedDemand?.(),
       createHistoryPanel(api, overlayStore, historyDays),
       () => perf.summary(),
+      () => dumpInducedData(),
     );
+  }
+
+  /** Download the live demand + network as JSON for the offline harness
+   *  (scripts/simulate.ts). Dumps ALL stations; the harness applies the
+   *  built-and-routed filter itself, matching the game. */
+  function dumpInducedData(): void {
+    try {
+      const dd = api.gameState.getDemandData();
+      if (!dd) return;
+      const stations = api.gameState.getStations({ includeTempRoutes: false });
+      const routes = api.gameState.getRoutes({ includeTempRoutes: false });
+      const groups = api.gameState.getStationGroups?.() ?? [];
+      const dump = buildDump(currentCity() || 'city', dd.points.values(), stations, routes, groups);
+      const blob = new Blob([JSON.stringify(dump)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `induced-dump-${(currentCity() || 'city').replace(/\W+/g, '_')}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      console.log(`${TAG} dumped ${dump.points.length} points, ${dump.stations.length} stations, ${dump.routes.length} routes`);
+    } catch (e) {
+      console.error(`${TAG} dump failed`, e);
+    }
   }
 
   function registerToolbarPanel(): void {

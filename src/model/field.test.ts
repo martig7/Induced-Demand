@@ -26,8 +26,9 @@ test('buildPointSites: one occupied site per demand point with cached access', (
 });
 
 test('computeStructuralHash: changes on route stops, stable on order', () => {
+  // Stops come from stComboTimings (the API leaves route.stations empty).
   const r = (id: string, stops: string[]): Route =>
-    ({ id, stations: stops.map((sid) => ({ id: sid })) }) as unknown as Route;
+    ({ id, stComboTimings: stops.map((sid, i) => ({ stNodeId: sid, stNodeIndex: i })) }) as unknown as Route;
   const h1 = computeStructuralHash([r('a', ['x', 'y']), r('b', ['z'])]);
   const h2 = computeStructuralHash([r('b', ['z']), r('a', ['x', 'y'])]);
   const h3 = computeStructuralHash([r('a', ['x', 'y', 'w']), r('b', ['z'])]);

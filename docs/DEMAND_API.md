@@ -141,6 +141,19 @@ getEffectiveCatchmentForStop(stop, cache) // → catchment radius (seconds), def
 and absolute overrides `catchmentOverride` / `transferRadiusOverride` /
 `walkSpeedOverride`.
 
+**Catchment membership is a HARD cutoff (verified 2026-07-20).** A stop serves a
+demand point iff `walkingTime ≤ getEffectiveCatchmentForStop(stop)` (default
+1800 s). `walkingTime = getWalkingTimeBetweenPoints / walkSpeedMultiplier`, and
+`getWalkingTimeBetweenPoints = getDistanceBetweenPoints / RULES.WALKING_SPEED`.
+`getDistanceBetweenPoints` is turf `distance(a,b,{units:'meters'})` — **straight-line
+great-circle metres**, NOT road-network. `RULES.WALKING_SPEED = 1` m/s (default),
+`WALKING_SPEED_ACCURATE_PATH = 1.5` (when `isAccuratePath`), airport pops ×0.5. So
+the base catchment is a **1800 m straight-line radius, hard-edged, with no
+distance decay** — within-catchment attractiveness comes only from the RAPTOR
+journey time, not from any falloff on the walk-to-station leg. The mod's
+`walkProx` therefore tapers linearly to 0 at the catchment edge (was a tight
+Gaussian that under-reached ~1/3 of the radius).
+
 Time-of-day demand curves (`getTimeOfDayRanges`) use `homeDemandMultiplier` /
 `workDemandMultiplier` per range (VERY_LOW 0.15 … HIGH 2.5). These are **global
 rush-hour curves**, not per-point levers — useful context, not a mod hook.

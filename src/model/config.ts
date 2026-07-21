@@ -32,6 +32,14 @@ export interface InducedDemandConfig {
   NOMINAL_TRANSIT_SPEED: number;
   /** Cost (s) of an in-complex interchange (station groups). */
   INTERCHANGE_SECONDS: number;
+  /**
+   * Max walk time (s) for a coordinate-derived transfer edge between two
+   * stations. The game API leaves `station.nearbyStations` empty, so transfers
+   * are computed from actual spacing (walk = dist/WALK_SPEED) up to this cap —
+   * this is what links two lines that meet, so without it a network is only as
+   * connected as its explicit interchange groups.
+   */
+  TRANSFER_MAX_SECONDS: number;
   /** Boarding wait (s) when a route has no usable service data. */
   DEFAULT_WAIT_SECONDS: number;
   /** Floor (s) for the boarding wait. */
@@ -104,6 +112,7 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   TAU_REACH: 900,
   NOMINAL_TRANSIT_SPEED: 15,
   INTERCHANGE_SECONDS: 45,
+  TRANSFER_MAX_SECONDS: 300,
   DEFAULT_WAIT_SECONDS: 300,
   MIN_WAIT_SECONDS: 30,
   R_MIN: 150,

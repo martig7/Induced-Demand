@@ -45,14 +45,17 @@ export function refreshSiteAccess(
 }
 
 /**
- * Structural hash of the live network (spec §8): route ids + per-route station
- * ids. This is the PRIMARY route-edit detector — temp-route commits fire NO
- * hook (decompile-verified), so Tier 2 compares this every day end.
+ * Structural hash of the live network (spec §8): route ids + per-route stop
+ * sequence. This is the PRIMARY route-edit detector — temp-route commits fire NO
+ * hook (decompile-verified), so Tier 2 compares this every day end. Uses
+ * `stComboTimings` (stNodeId order), NOT `route.stations` — the API leaves the
+ * latter empty, so hashing it missed every stop edit (stale field after adding a
+ * stop to a line).
  */
 export function computeStructuralHash(routes: Route[]): string {
   return routes
     .filter((r) => r.tempParentId == null)
-    .map((r) => `${r.id}:${(r.stations ?? []).map((s) => s.id).join(',')}`)
+    .map((r) => `${r.id}:${(r.stComboTimings ?? []).map((t) => t.stNodeId).join(',')}`)
     .sort()
     .join('|');
 }

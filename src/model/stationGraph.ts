@@ -77,6 +77,24 @@ export function routeRideSeconds(
   return rides;
 }
 
+/**
+ * A route's ordered stops. The game API leaves `route.stations` empty/undefined
+ * (verified in-game); the stop sequence lives in `stComboTimings` (order =
+ * stNodeIndex), each entry keyed to a station via its `stNodeIds`. Falls back to
+ * `route.stations` when present (fixtures / other builds).
+ */
+export function routeStops(route: Route, byStNode: Map<string, Station>): Station[] {
+  if (route.stations && route.stations.length > 0) return route.stations;
+  const timings = [...(route.stComboTimings ?? [])].sort((a, b) => a.stNodeIndex - b.stNodeIndex);
+  const seen = new Set<string>();
+  const stops: Station[] = [];
+  for (const t of timings) {
+    const st = byStNode.get(t.stNodeId);
+    if (st && !seen.has(st.id)) { seen.add(st.id); stops.push(st); }
+  }
+  return stops;
+}
+
 export function buildStationGraph(
   routes: Route[],
   stations: Station[],
@@ -91,10 +109,14 @@ export function buildStationGraph(
   const addNode = (): number => { adj.push([]); return nodeCount++; };
   const edge = (a: number, b: number, s: number): void => { adj[a].push({ to: b, s }); };
 
+  // stNodeId → station, so routes can resolve their stops from stComboTimings.
+  const byStNode = new Map<string, Station>();
+  for (const s of stations) for (const n of s.stNodeIds ?? []) byStNode.set(n, s);
+
   // Ride + boarding edges per live route.
   for (const route of routes) {
     if (route.tempParentId != null) continue;
-    const stops = (route.stations ?? []).filter((s) => streetIndex.has(s.id));
+    const stops = routeStops(route, byStNode).filter((s) => streetIndex.has(s.id));
     if (stops.length < 2) continue;
     const wait = peakWaitSeconds(route, routeCycleSeconds(route), cfg);
     const rides = routeRideSeconds(route, stops, cfg);
@@ -111,12 +133,27 @@ export function buildStationGraph(
     }
   }
 
-  // Transfer walks (the game's own nearbyStations basis).
+  // Transfer walks (the game's own nearbyStations basis, when populated).
   for (const st of stations) {
     const a = streetIndex.get(st.id)!;
     for (const nb of st.nearbyStations ?? []) {
       const b = streetIndex.get(nb.stationId);
       if (b !== undefined && b !== a) edge(a, b, nb.walkingTime);
+    }
+  }
+
+  // Coordinate-derived transfers: the API leaves nearbyStations empty, so two
+  // lines that MEET (or run close) would otherwise be linked only by explicit
+  // interchange groups. Add a walk edge for every station pair within
+  // TRANSFER_MAX_SECONDS on foot. O(N²), fine for realistic station counts.
+  const transferMaxM = cfg.TRANSFER_MAX_SECONDS * cfg.WALK_SPEED;
+  for (let i = 0; i < stations.length; i++) {
+    for (let j = i + 1; j < stations.length; j++) {
+      const d = haversine(stations[i].coords, stations[j].coords);
+      if (d > transferMaxM) continue;
+      const w = d / cfg.WALK_SPEED;
+      edge(i, j, w);
+      edge(j, i, w);
     }
   }
 

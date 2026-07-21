@@ -85,3 +85,32 @@ test('buildStationGraph: interchange group links streets cheaply', () => {
   const link = g.adj[streetA].find((e) => e.to === g.streetIndex.get('B') && e.s === cfg.INTERCHANGE_SECONDS);
   assert.ok(link);
 });
+
+import { dijkstraStreetTimes } from './opportunity';
+
+test('buildStationGraph: connects a line via stComboTimings when route.stations is empty', () => {
+  // The real game leaves route.stations undefined; stops must come from timings.
+  const route = { ...r1, stations: undefined } as unknown as Route;
+  const g = buildStationGraph([route], [A, B, C], [], cfg);
+  const t = dijkstraStreetTimes(g, g.streetIndex.get('A')!);
+  const tc = t[g.streetIndex.get('C')!];
+  assert.ok(Number.isFinite(tc) && tc > 0, `A reaches C along the line (got ${tc})`);
+});
+
+test('buildStationGraph: coordinate walk-transfer links two lines that meet', () => {
+  // Line 1 (X–P) and line 2 (Y–Q) share no stop and have no group, but X and Y
+  // are ~33 m apart, so a coordinate transfer must connect the lines.
+  const X = station('X', 0, 0, ['l1'], ['nX']);
+  const P = station('P', 0.02, 0, ['l1'], ['nP']);
+  const Y = station('Y', 0.0003, 0, ['l2'], ['nY']);
+  const Q = station('Q', 0.0003, 0.02, ['l2'], ['nQ']);
+  const line = (id: string, a: string, b: string): Route => ({
+    id, stComboTimings: [
+      { stNodeId: a, stNodeIndex: 0, arrivalTime: 0, departureTime: 10 },
+      { stNodeId: b, stNodeIndex: 1, arrivalTime: 60, departureTime: 70 },
+    ], trainSchedule: { highDemand: 2, mediumDemand: 1, lowDemand: 1 },
+  } as unknown as Route);
+  const g = buildStationGraph([line('l1', 'nX', 'nP'), line('l2', 'nY', 'nQ')], [X, P, Y, Q], [], cfg);
+  const t = dijkstraStreetTimes(g, g.streetIndex.get('P')!);
+  assert.ok(Number.isFinite(t[g.streetIndex.get('Q')!]), 'P (line 1) reaches Q (line 2) via the X↔Y transfer');
+});

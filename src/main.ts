@@ -612,7 +612,7 @@ if (!api) {
         raster = rasterizeAccessField(bbox, (lon, lat) => {
           const a = f.accessIdx.at([lon, lat]);
           return view === 'accessRes' ? a.res : a.com;
-        });
+        }, { contrast: true }); // normalize + gamma-lift so a low-max field still reads
       } else if (view === 'cells') {
         // Cells view: each Voronoi cell (nearest-anchor region) colored by its
         // split pressure / threshold (hot = about to spawn a point). Zero-pressure

@@ -139,6 +139,25 @@ const ACCESS_GRID_MAX = 512;
 /** Ramp alpha from 0→full over [MIN_VALUE, MIN_VALUE + ALPHA_FADE]. */
 const ALPHA_FADE = 0.12;
 
+/**
+ * Access-view contrast gamma. Access rarely nears 1 (walkProx tapers with
+ * distance and Ô is a fraction), so a raw 0→1 ramp paints the whole field in the
+ * pale low color and relative differences vanish. The access bake instead
+ * normalizes each pixel to the field's OWN max (best-connected pixel → the ramp
+ * top) and applies this gamma < 1 to lift the low-mid range. Lower = more
+ * extreme (more of the field pushed toward the hot color). 1 = plain normalize.
+ */
+const ACCESS_CONTRAST_GAMMA = 0.55;
+
+/**
+ * The access-view contrast stretch: normalize `raw` to the field max `maxV`,
+ * then gamma-lift. `maxV ≤ 0` (empty field) → 0. Exported for testing.
+ */
+export function contrastStretch(raw: number, maxV: number, gamma = ACCESS_CONTRAST_GAMMA): number {
+  if (maxV <= 0) return 0;
+  return clamp01(clamp01(raw) / maxV) ** gamma;
+}
+
 export interface RasterOptions {
   /** Longest grid dimension in pixels (the shorter side keeps aspect). */
   gridMax?: number;
@@ -240,6 +259,13 @@ export function rasterizeAccessField(
   opts: {
     gridMax?: number;
     /**
+     * Contrast-stretch the field against its own max before the ramp (see
+     * contrastStretch). Set for the access views, whose values sit low and would
+     * otherwise render mostly as the pale low color. Off for the cells view,
+     * whose split-pressure value is already absolute and meaningful.
+     */
+    contrast?: boolean;
+    /**
      * Optional per-pixel predicate for a diagonal-HATCH fill (reads as "dashed"):
      * the cells view uses it to mark cells that are ready but can't place a cut
      * (saturated density), distinguishing them from solid cells about to split.
@@ -256,13 +282,46 @@ export function rasterizeAccessField(
   const aspect = (spanLon * mPerLon) / (spanLat * M_PER_DEG_LAT);
   const width = aspect >= 1 ? gridMax : Math.max(1, Math.round(gridMax * aspect));
   const height = aspect >= 1 ? Math.max(1, Math.round(gridMax / aspect)) : gridMax;
+  const lonAt = (x: number): number => w + ((x + 0.5) / width) * spanLon;
+  const latAt = (y: number): number => n - ((y + 0.5) / height) * spanLat; // pixel y grows downward
 
   const data = new Uint8ClampedArray(width * height * 4);
   let any = false;
+
+  // Contrast path (access views): two-pass — sample the whole field to find its
+  // max, then stretch each pixel against it (contrastStretch). This is what
+  // pulls a typically-low access field off the pale low color so differences
+  // read. No hatch here (the access views don't pass one).
+  if (opts.contrast) {
+    const vals = new Float32Array(width * height);
+    let maxV = 0;
+    for (let y = 0; y < height; y++) {
+      const lat = latAt(y);
+      for (let x = 0; x < width; x++) {
+        const v = clamp01(valueAt(lonAt(x), lat));
+        vals[y * width + x] = v;
+        if (v > maxV) maxV = v;
+      }
+    }
+    for (let i = 0; i < vals.length; i++) {
+      const v = contrastStretch(vals[i], maxV);
+      if (v < MIN_VALUE) continue;
+      any = true;
+      const [r, g, b] = rampColor(v);
+      const o = i * 4;
+      data[o] = r; data[o + 1] = g; data[o + 2] = b;
+      data[o + 3] = Math.round(255 * clamp01((v - MIN_VALUE) / ALPHA_FADE));
+    }
+    return { data, width, height, bbox, empty: !any };
+  }
+
+  // Raw single-pass (cells view): value + hatch predicate are evaluated
+  // back-to-back per pixel so a memoized valueAt/hatchAt (nearest-anchor) lookup
+  // is hit rather than recomputed.
   for (let y = 0; y < height; y++) {
-    const lat = n - ((y + 0.5) / height) * spanLat; // pixel y grows downward
+    const lat = latAt(y);
     for (let x = 0; x < width; x++) {
-      const lon = w + ((x + 0.5) / width) * spanLon;
+      const lon = lonAt(x);
       const v = clamp01(valueAt(lon, lat));
       if (v < MIN_VALUE) continue;
       // Hatch: drop every other 4px-wide diagonal band so the fill reads as a

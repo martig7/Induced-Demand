@@ -131,7 +131,32 @@ test('access views ignore cuts; negligible cut pressure dropped', () => {
 
 // --- continuous access field -------------------------------------------------
 
-import { rasterizeAccessField } from './heatmap';
+import { rasterizeAccessField, contrastStretch } from './heatmap';
+
+test('contrastStretch: normalizes to the field max then gamma-lifts', () => {
+  assert.equal(contrastStretch(0.3, 0), 0);        // empty field → 0
+  assert.equal(contrastStretch(0, 0.5), 0);        // no access → 0
+  assert.equal(contrastStretch(0.4, 0.4), 1);      // the field max maps to the ramp top
+  // gamma < 1 lifts a mid value above its linear normalized position.
+  assert.ok(contrastStretch(0.25, 0.5) > 0.5, 'half-max reads hotter than 50%');
+  // monotonic in raw.
+  assert.ok(contrastStretch(0.3, 0.6) > contrastStretch(0.2, 0.6));
+});
+
+test('rasterizeAccessField contrast: a low-peak field still reaches the hot ramp end', () => {
+  const valueAt = (lon: number) => lon * 0.4; // access peaks at ~0.4, never near 1
+  const east = (r: ReturnType<typeof rasterizeAccessField>) => {
+    const x = r.width - 1, y = Math.floor(r.height / 2);
+    const o = (y * r.width + x) * 4;
+    return [r.data[o], r.data[o + 1], r.data[o + 2]];
+  };
+  const raw = rasterizeAccessField([0, 0, 1, 1], valueAt, { gridMax: 20 });
+  const stretched = rasterizeAccessField([0, 0, 1, 1], valueAt, { gridMax: 20, contrast: true });
+  // Raw: the 0.4 peak sits low on the ramp → pale. Stretched: it normalizes to
+  // the field max → the ramp top (deep purple #810f7c) exactly.
+  assert.deepEqual(east(stretched), [129, 15, 124]);
+  assert.notDeepEqual(east(raw), [129, 15, 124]);
+});
 
 test('rasterizeAccessField: paints the continuous field where access is positive', () => {
   // High access only in the eastern half of the bbox → west transparent, east hot.

@@ -9,6 +9,7 @@
     "postbuild": "tsx scripts/install.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test \"src/**/*.test.ts\"",
+    "simulate": "tsx scripts/simulate.ts",
     "release": "tsx scripts/release.ts"
   },
   "license": "MIT",

@@ -105,10 +105,13 @@ export interface InducedDemandConfig {
   SPLIT_CAP_ACCESS_BIAS: number;
   /**
    * Lower edge of the quantile bracket [SPLIT_CAP_QUANTILE_FLOOR, 1] a
-   * materialized point's cap is drawn from. Lowered from the original 0.5 to
-   * compensate for SPLIT_CAP_ACCESS_BIAS: with access now steering the draw, a
-   * low-access point should be able to land genuinely small (below the native
-   * median) rather than being floored at it. Higher → all new areas stay dense.
+   * materialized point's cap is drawn from — how DENSE new cut points land in the
+   * native mass distribution. Raised to 0.75 (upper quartile): paired with the
+   * residential-density split gate this drives the sparse-vs-dense induction
+   * spread — a sparse city (ungated, many cut points) fattens all of them for
+   * high induction, while a dense city (gated, few points) barely moves — AND it
+   * restores big agglomeration job centers that a low floor flattened. Higher →
+   * denser new development everywhere; above ~0.8 induction goes vertical.
    */
   SPLIT_CAP_QUANTILE_FLOOR: number;
   // --- Voronoi subdivision (spec 2026-07-18) ---
@@ -192,7 +195,7 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   FIT_MASS_QUANTILE: 0.8,
   ENVELOPE_QUANTILE: 0.95,
   SPLIT_CAP_ACCESS_BIAS: 0.5,
-  SPLIT_CAP_QUANTILE_FLOOR: 0.25,
+  SPLIT_CAP_QUANTILE_FLOOR: 0.75, // dense new cut points → sparse cities induce hard, dense cities gate
   LATTICE_M: 250,
   TARGET_SPLIT_DAYS: 10,
   SPLIT_PRESSURE_DECAY: 1.0, // net accrual excess·fill − 1: needs room for ~a full extra point

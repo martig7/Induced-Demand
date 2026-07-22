@@ -73,7 +73,7 @@ function buildField(
     [...dd.points.values()].map((p) => ({ id: p.id, location: p.location }));
   const cells = integrateCells({
     anchors: anchorsOf(), stations: routedCoords, catchmentM,
-    latticeM: cfg.LATTICE_M, deps: latticeDeps(accessIdx, fit, cfg, blocked),
+    latticeM: cfg.LATTICE_M, clearanceM: cfg.WATER_CLEARANCE_M, deps: latticeDeps(accessIdx, fit, cfg, blocked),
   });
   const jobDensity = buildJobDensity(dd.points.values(), cfg);
   const popDensity = buildPopDensity(dd.points.values(), cfg.POP_DENSITY_RADIUS_M);

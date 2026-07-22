@@ -83,6 +83,16 @@ test('findCut: returns a dry, min-spaced sample in the cell near the centroid', 
   assert.ok(haversine(cut!, [0, 0]) >= 300 - 1, `${haversine(cut!, [0, 0])}`);
 });
 
+test('integrateCells: water bounds the cell — no mass/centroid over the blocked side', () => {
+  const a = anchors([['p1', 0, 0]]);
+  const eastBlocked: LatticeDeps = { ...DEPS, blockedWithin: ([lon]) => lon > 0 }; // east half is water
+  const open = integrateCells({ anchors: a, stations: [[0, 0]], catchmentM: 1000, latticeM: 250, deps: DEPS });
+  const bounded = integrateCells({ anchors: a, stations: [[0, 0]], catchmentM: 1000, latticeM: 250, clearanceM: 0, deps: eastBlocked });
+  const co = open.get('p1')!, cb = bounded.get('p1')!;
+  assert.ok(cb.supportedMass < co.supportedMass * 0.75, 'the blocked half is dropped from the mass');
+  assert.ok(cb.centroid![0] < 0, 'centroid sits on the open (western) side, off the water');
+});
+
 test('findCut: null when water or spacing exclude every sample', () => {
   const a = anchors([['p1', 0, 0]]);
   const wet: LatticeDeps = { ...DEPS, blockedWithin: () => true };

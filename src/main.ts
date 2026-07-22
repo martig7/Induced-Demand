@@ -407,6 +407,7 @@ if (!api) {
         .map((s) => s.coords),
       catchmentM: DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED,
       latticeM: DEFAULT_CONFIG.LATTICE_M,
+      clearanceM: DEFAULT_CONFIG.WATER_CLEARANCE_M,
       deps: latticeDeps(accessIdx, fit, blocked),
     });
   }

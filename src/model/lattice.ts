@@ -163,6 +163,15 @@ export interface IntegrateOpts {
   stations: Coordinate[];
   catchmentM: number;
   latticeM: number;
+  /**
+   * Water/airport (+ this clearance) is a BOUNDARY of the cells: samples within
+   * `clearanceM` of a blocked cell are excluded from both the supported-mass
+   * integral and the centroid, so a cell never reaches over water — its centroid
+   * lands where a point can actually be placed (findCut's own margin), and water
+   * stops accruing split pressure it could never place. 0 = exclude only blocked
+   * cells themselves; absent = no exclusion (raster off).
+   */
+  clearanceM?: number;
   deps: LatticeDeps;
 }
 
@@ -171,10 +180,14 @@ export function integrateCells(opts: IntegrateOpts): Map<string, CellIntegral> {
   const index = createAnchorIndex(opts.anchors);
   const cells = new Map<string, CellIntegral & { wSum: number; lonSum: number; latSum: number }>();
   const sampleArea = opts.latticeM * opts.latticeM;
+  const clearanceM = opts.clearanceM ?? 0;
   enumerateSamples(opts.stations, opts.catchmentM, opts.latticeM, (sample) => {
     const a = deps.accessAt(sample);
     const access = Math.max(a.res, a.com);
     if (access < deps.minAccess) return;
+    // Water/airport (+ clearance) bounds the cell — not buildable land, so it
+    // contributes no supported mass and never pulls the centroid over the water.
+    if (deps.blockedWithin(sample, clearanceM)) return;
     const anchor = index.nearest(sample);
     if (!anchor) return;
     const density = deps.supportedDensity(access);

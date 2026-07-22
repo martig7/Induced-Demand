@@ -46,6 +46,11 @@ export interface RunDayDeps {
   findCut(anchorId: string, centroid: Coordinate): Coordinate | null;
   /** Normalized [0,1] local job density for the agglomeration boost; absent → 0. */
   jobDensity?(c: Coordinate): number;
+  /**
+   * Local population density (people/m², residents + jobs) for the split-headroom
+   * gate; absent → no gate (headroom 1). See TARGET_POP_DENSITY_PER_KM2.
+   */
+  popDensity?(c: Coordinate): number;
 }
 
 function bumpDelta(deltas: Record<string, DayDelta>, id: string, key: keyof DayDelta): void {
@@ -239,12 +244,21 @@ export function runDay(
       // Greenfield (no baseline cap) has nothing to densify, so it's ungated.
       const nativeCap = (capRes.get(id) ?? 0) + (capJob.get(id) ?? 0);
       const fill = nativeCap > 0 ? Math.min(1, Math.max(0, (p.residents + p.jobs) / nativeCap)) : 1; // 0..1
+      // Population-density HEADROOM gate: a cell stops accruing where local
+      // people-per-area already meets the target, so an already-dense city adds
+      // few new points while a sparse one subdivides toward it. clamp01(1 −
+      // localDensity/target); absent popDensity or target ≤ 0 → ungated (1).
+      const targetPerM2 = cfg.TARGET_POP_DENSITY_PER_KM2 / 1e6;
+      const headroom = deps.popDensity && targetPerM2 > 0
+        ? Math.max(0, 1 - (deps.popDensity(p.location) / targetPerM2))
+        : 1;
       // Net accrual with decay: a cell must be SUSTAINABLY over-subdivided
-      // (excess·fill above SPLIT_PRESSURE_DECAY) to build pressure. Marginal cells
-      // relax to 0 instead of creeping to the threshold and sticking uncuttable.
+      // (excess·fill·headroom above SPLIT_PRESSURE_DECAY) to build pressure.
+      // Marginal cells relax to 0 instead of creeping to the threshold and
+      // sticking uncuttable.
       const next = Math.max(0, Math.min(
         cfg.TARGET_SPLIT_DAYS,
-        (ledger.cells[id] ?? 0) + excess * fill - cfg.SPLIT_PRESSURE_DECAY,
+        (ledger.cells[id] ?? 0) + excess * fill * headroom - cfg.SPLIT_PRESSURE_DECAY,
       ));
       if (next !== 0) ledger.cells[id] = next; else delete ledger.cells[id];
       if (next >= cfg.TARGET_SPLIT_DAYS) ready.push({ id, pressure: next, centroid: integral.centroid });

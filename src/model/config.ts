@@ -134,6 +134,18 @@ export interface InducedDemandConfig {
    */
   SPLIT_PRESSURE_DECAY: number;
   /**
+   * Split HEADROOM target: local population density (people per km², residents +
+   * jobs) at or above which a cell stops accruing split pressure. Readiness is
+   * multiplied by `headroom = clamp01(1 − localDensity/target)`, so a city
+   * already at/above the target adds few new demand points while a sparse one
+   * subdivides toward it — the density-DIFFERENTIAL lever (dense NYC splits
+   * little, sparse Denver more). Measured over POP_DENSITY_RADIUS_M. Lower =
+   * fewer new points; a very high value disables the gate (headroom ≈ 1).
+   */
+  TARGET_POP_DENSITY_PER_KM2: number;
+  /** Neighborhood radius (m) for the local population-density headroom measure. */
+  POP_DENSITY_RADIUS_M: number;
+  /**
    * Growth-rate multiplier for materialized (split) points, so a new dot fills
    * in naturally but faster than a native point — it earns its pops over days
    * instead of instantly, without an artificial demand seed. 1 = same as native.
@@ -183,5 +195,7 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   LATTICE_M: 250,
   TARGET_SPLIT_DAYS: 10,
   SPLIT_PRESSURE_DECAY: 1.0, // net accrual excess·fill − 1: needs room for ~a full extra point
+  TARGET_POP_DENSITY_PER_KM2: 8000, // split headroom target (res+jobs/km²); sweep to calibrate
+  POP_DENSITY_RADIUS_M: 600,
   NEW_POINT_GROWTH_BOOST: 5, // split dots fill in ~5x faster than a native point
 };

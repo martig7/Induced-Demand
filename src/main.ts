@@ -60,6 +60,7 @@ import {
 import { buildWaterIndex, type WaterIndex, type OceanDepthFile } from './game/waterIndex';
 import { buildAirportIndex, type AirportIndex, type AirportFeatureCollection } from './game/airportIndex';
 import { buildJobDensity, type JobDensity } from './model/agglomeration';
+import { buildPopDensity, type PopDensity } from './model/localDensity';
 import { recreateMaterializedPoints } from './model/ledger';
 import { createPerfTracker, PERF_BUDGETS } from './model/perf';
 import {
@@ -165,6 +166,8 @@ if (!api) {
       airportFailed: boolean;
       /** Local job-density field for the agglomeration score boost. */
       jobDensity: JobDensity;
+      /** Local population-density field for the split-headroom gate. */
+      popDensity: PopDensity;
     };
   }
   const w = window as unknown as Record<string, number | boolean | undefined>;
@@ -487,6 +490,7 @@ if (!api) {
       fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
       water, waterFailed, airport, airportFailed,
       jobDensity: buildJobDensity(dd.points.values(), DEFAULT_CONFIG),
+      popDensity: buildPopDensity(dd.points.values(), DEFAULT_CONFIG.POP_DENSITY_RADIUS_M),
     };
     const total = performance.now() - t0;
     perf.record('tier1', PERF_BUDGETS.tier1Total, total, `${sites.length} sites, ${cells.size} cells`);
@@ -516,6 +520,7 @@ if (!api) {
         fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
         water, waterFailed, airport, airportFailed,
         jobDensity: buildJobDensity(dd.points.values(), DEFAULT_CONFIG),
+        popDensity: buildPopDensity(dd.points.values(), DEFAULT_CONFIG.POP_DENSITY_RADIUS_M),
       };
       return sites;
     }, (sites) => `${sites.length} sites (sync promotion)`);
@@ -1359,6 +1364,7 @@ if (!api) {
             massResAt: (a, u) => massResAt(field.fit, a, u, DEFAULT_CONFIG.SPLIT_CAP_QUANTILE_FLOOR),
             massJobAt: (a, u) => massJobAt(field.fit, a, u, DEFAULT_CONFIG.SPLIT_CAP_QUANTILE_FLOOR),
             jobDensity: (c) => field.jobDensity.at(c),
+            popDensity: (c) => field.popDensity.at(c),
             cells: field.cells,
             // Cut validity re-checks against the CURRENT points (splits earlier
             // in the same loop may have added anchors since the lattice pass).

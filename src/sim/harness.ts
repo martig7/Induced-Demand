@@ -20,6 +20,7 @@ import {
 import { buildPointSites, type Site } from '../model/field';
 import { integrateCells, findCut, type CellIntegral, type LatticeDeps } from '../model/lattice';
 import { buildJobDensity } from '../model/agglomeration';
+import { buildPopDensity } from '../model/localDensity';
 import { runDay, type RunDayDeps } from '../model/engine';
 import { newLedger, captureBaselines } from '../model/ledger';
 import { makeRng } from '../model/gravity';
@@ -72,10 +73,12 @@ function buildField(
     latticeM: cfg.LATTICE_M, deps: latticeDeps(accessIdx, fit, cfg),
   });
   const jobDensity = buildJobDensity(dd.points.values(), cfg);
+  const popDensity = buildPopDensity(dd.points.values(), cfg.POP_DENSITY_RADIUS_M);
   const deps: RunDayDeps = {
     massResAt: (a, u) => massResAt(fit, a, u, cfg.SPLIT_CAP_QUANTILE_FLOOR),
     massJobAt: (a, u) => massJobAt(fit, a, u, cfg.SPLIT_CAP_QUANTILE_FLOOR),
     jobDensity: (c) => jobDensity.at(c),
+    popDensity: (c) => popDensity.at(c),
     cells,
     findCut: (anchorId, centroid) => findCut({
       anchorId, centroid, anchors: anchorsOf(), latticeM: cfg.LATTICE_M,

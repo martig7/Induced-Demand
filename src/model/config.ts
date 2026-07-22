@@ -106,12 +106,13 @@ export interface InducedDemandConfig {
   /**
    * Lower edge of the quantile bracket [SPLIT_CAP_QUANTILE_FLOOR, 1] a
    * materialized point's cap is drawn from — how DENSE new cut points land in the
-   * native mass distribution. Raised to 0.75 (upper quartile): paired with the
+   * native mass distribution. Raised to 0.6 (upper-mid): paired with the
    * residential-density split gate this drives the sparse-vs-dense induction
    * spread — a sparse city (ungated, many cut points) fattens all of them for
    * high induction, while a dense city (gated, few points) barely moves — AND it
    * restores big agglomeration job centers that a low floor flattened. Higher →
-   * denser new development everywhere; above ~0.8 induction goes vertical.
+   * denser new development everywhere; above ~0.8 induction goes vertical. At 0.6,
+   * native-start in-catch growth is ~24% NYC / ~36% London / ~60% Denver.
    */
   SPLIT_CAP_QUANTILE_FLOOR: number;
   // --- Voronoi subdivision (spec 2026-07-18) ---
@@ -217,7 +218,7 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   FIT_MASS_QUANTILE: 0.8,
   ENVELOPE_QUANTILE: 0.95,
   SPLIT_CAP_ACCESS_BIAS: 0.5,
-  SPLIT_CAP_QUANTILE_FLOOR: 0.75, // dense new cut points → sparse cities induce hard, dense cities gate
+  SPLIT_CAP_QUANTILE_FLOOR: 0.6, // dense new cut points → sparse cities induce hard, dense cities gate
   LATTICE_M: 250,
   FINDCUT_LATTICE_M: 100, // finer placement grid: dodge shorelines/runways at higher res
   WATER_CLEARANCE_M: 100, // keep new points ≥100 m off water/airport edges

@@ -195,7 +195,7 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   LATTICE_M: 250,
   TARGET_SPLIT_DAYS: 10,
   SPLIT_PRESSURE_DECAY: 1.0, // net accrual excess·fill − 1: needs room for ~a full extra point
-  TARGET_POP_DENSITY_PER_KM2: 8000, // split headroom target (res+jobs/km²); sweep to calibrate
+  TARGET_POP_DENSITY_PER_KM2: 3000, // split headroom target (res+jobs/km²): dense cities gate, sparse subdivide
   POP_DENSITY_RADIUS_M: 600,
   NEW_POINT_GROWTH_BOOST: 5, // split dots fill in ~5x faster than a native point
 };

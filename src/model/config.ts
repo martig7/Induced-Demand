@@ -81,16 +81,6 @@ export interface InducedDemandConfig {
   /** Min/max point spacing (m) — clamps the fitted spacing curve. */
   R_MIN: number;
   R_MAX: number;
-  /**
-   * Target spacing (m) between demand points at FULL access, for SPLITTING. The
-   * split path targets this ABSOLUTE point density instead of the city's own
-   * nearest-neighbor spacing, so a dense city (natives already closer than this)
-   * gets few/no new cut points while a sparse one subdivides toward it. Tapers
-   * linearly to R_MAX at zero access; clamped to [R_MIN, R_MAX]. Lower = denser
-   * target = MORE cut points. Only the split path uses it (findCut spacing + cell
-   * readiness); per-point caps and the density fit are unaffected.
-   */
-  TARGET_SPACING_FULL_M: number;
   /** Lattice samples below this max(accessRes, accessCom) are outside the field. */
   MIN_SITE_ACCESS: number;
   // --- Density fit ---
@@ -183,7 +173,6 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   MIN_WAIT_SECONDS: 30,
   R_MIN: 150,
   R_MAX: 600,
-  TARGET_SPACING_FULL_M: 300, // absolute cut-point spacing target at full access (was city-derived)
   MIN_SITE_ACCESS: 0.05,
   FIT_BINS: 8,
   FIT_SPACING_QUANTILE: 0.25,

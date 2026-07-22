@@ -149,20 +149,6 @@ export function spacingAt(fit: DensityFit, access: number): number {
 }
 
 /**
- * Absolute target spacing (m) between demand points for the SPLIT path: linear
- * from R_MAX at access 0 to TARGET_SPACING_FULL_M at access 1, clamped to
- * [R_MIN, R_MAX]. Replaces the city-derived `spacingAt` in the lattice deps so
- * cut-point density targets OUR value, not the city's own nearest-neighbor
- * distribution — a dense city (natives already tighter) splits little, a sparse
- * one subdivides toward the target. Config-only; no fit needed.
- */
-export function targetSpacingAt(access: number, cfg: InducedDemandConfig): number {
-  const a = Math.min(1, Math.max(0, access));
-  const s = cfg.R_MAX - (cfg.R_MAX - cfg.TARGET_SPACING_FULL_M) * a;
-  return Math.min(cfg.R_MAX, Math.max(cfg.R_MIN, s));
-}
-
-/**
  * Materialized-point RESIDENT / JOB cap, DRAWN from the native side-distribution
  * at this access rather than a flat quantile — so a new point inherits the
  * side's shape (even residents, heavy-tailed jobs). `u` is a stable per-point

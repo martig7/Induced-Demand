@@ -15,7 +15,7 @@ import {
   stationMasses, computeOpportunities, buildAccessIndex, type AccessIndex,
 } from '../model/opportunity';
 import {
-  fitDensity, targetSpacingAt, supportedDensityAt, massResAt, massJobAt, type DensityFit,
+  fitDensity, spacingAt, supportedDensityAt, massResAt, massJobAt, type DensityFit,
 } from '../model/densityFit';
 import { buildPointSites, type Site } from '../model/field';
 import { integrateCells, findCut, type CellIntegral, type LatticeDeps } from '../model/lattice';
@@ -45,7 +45,7 @@ function latticeDeps(accessIdx: AccessIndex, fit: DensityFit, cfg: InducedDemand
     isWater: () => false,
     isAirport: () => false,
     supportedDensity: (a) => supportedDensityAt(fit, a),
-    spacingAt: (a) => targetSpacingAt(a, cfg),
+    spacingAt: (a) => spacingAt(fit, a),
     minAccess: cfg.MIN_SITE_ACCESS,
   };
 }

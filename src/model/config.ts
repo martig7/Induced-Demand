@@ -118,6 +118,20 @@ export interface InducedDemandConfig {
   /** Lattice sample pitch (m) for cell integration. */
   LATTICE_M: number;
   /**
+   * Candidate sample pitch (m) for findCut placement — finer than LATTICE_M so a
+   * new point can dodge water/airport shorelines at higher resolution (the
+   * integration lattice stays coarse for cost). Lower = sharper avoidance but
+   * more samples per split (watch peak-split-day cost).
+   */
+  FINDCUT_LATTICE_M: number;
+  /**
+   * Min clearance (m) a new point keeps from water/airport: findCut rejects a
+   * candidate with water/airport within this radius (ring test), so points don't
+   * sit right at a shoreline or runway edge. 0 = reject only points exactly on
+   * water/airport (legacy).
+   */
+  WATER_CLEARANCE_M: number;
+  /**
    * Split-pressure threshold (in days). A cell accrues `excess × fill` per day,
    * where excess = supportedMass/capTotal − 1 (extra anchor-loads it supports).
    * So a large, under-subdivided cell (a new station's catchment) crosses this
@@ -197,6 +211,8 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   SPLIT_CAP_ACCESS_BIAS: 0.5,
   SPLIT_CAP_QUANTILE_FLOOR: 0.75, // dense new cut points → sparse cities induce hard, dense cities gate
   LATTICE_M: 250,
+  FINDCUT_LATTICE_M: 100, // finer placement grid: dodge shorelines/runways at higher res
+  WATER_CLEARANCE_M: 100, // keep new points ≥100 m off water/airport edges
   TARGET_SPLIT_DAYS: 10,
   SPLIT_PRESSURE_DECAY: 1.0, // net accrual excess·fill − 1: needs room for ~a full extra point
   TARGET_POP_DENSITY_PER_KM2: 3000, // split headroom target (res+jobs/km²): dense cities gate, sparse subdivide

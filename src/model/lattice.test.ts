@@ -102,12 +102,31 @@ test('findCut: airport excludes every sample and tallies the reason', () => {
   const cells = integrateCells({
     anchors: a, stations: [[0, 0]], catchmentM: 800, latticeM: 250, deps: DEPS,
   });
-  const reject = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0 };
+  const reject = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0, clearance: 0 };
   const cut = findCut({
     anchorId: 'p1', centroid: cells.get('p1')!.centroid!, anchors: a, latticeM: 250, deps: onAirport,
   }, reject);
   assert.equal(cut, null);
   assert.ok(reject.airport > 0 && reject.airport === reject.samples, 'all samples rejected as airport');
+});
+
+test('findCut: clearance margin rejects candidates hugging a shoreline', () => {
+  const a = anchors([['p1', 0, 0]]);
+  const cells = integrateCells({
+    anchors: a, stations: [[0, 0]], catchmentM: 800, latticeM: 250, deps: DEPS,
+  });
+  const M = 1 / 111194.9; // deg per metre (lat)
+  // Dry only in a thin |lat| < 100 m horizontal strip; everything else water.
+  const strip: LatticeDeps = { ...DEPS, isWater: ([, lat]) => Math.abs(lat) >= 100 * M };
+  const centroid = cells.get('p1')!.centroid!;
+  const dry = findCut({ anchorId: 'p1', centroid, anchors: a, latticeM: 150, deps: strip });
+  const reject = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0, clearance: 0 };
+  const clear = findCut({
+    anchorId: 'p1', centroid, anchors: a, latticeM: 150, clearanceM: 120, deps: strip,
+  }, reject);
+  assert.ok(dry !== null, 'without clearance a dry strip point is accepted');
+  assert.equal(clear, null, 'a 120 m clearance is wider than the strip — every candidate is rejected');
+  assert.ok(reject.clearance > 0, 'clearance rejects are tallied');
 });
 
 test('createAnchorIndex: nearer axial anchor two rings out beats a diagonal first hit', () => {

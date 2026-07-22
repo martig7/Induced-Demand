@@ -81,7 +81,8 @@ function buildField(
     popDensity: (c) => popDensity.at(c),
     cells,
     findCut: (anchorId, centroid) => findCut({
-      anchorId, centroid, anchors: anchorsOf(), latticeM: cfg.LATTICE_M,
+      anchorId, centroid, anchors: anchorsOf(),
+      latticeM: cfg.FINDCUT_LATTICE_M, clearanceM: cfg.WATER_CLEARANCE_M,
       deps: latticeDeps(accessIdx, fit, cfg),
     }),
   };

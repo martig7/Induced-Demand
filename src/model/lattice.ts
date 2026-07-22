@@ -206,6 +206,13 @@ export interface FindCutOpts {
   centroid: Coordinate;
   anchors: { id: string; location: Coordinate }[];
   latticeM: number;
+  /**
+   * Min clearance (m) a cut must keep from water/airport: a candidate is rejected
+   * if water/airport is within this radius (8-point ring test), not only if the
+   * point itself is on it — so new points don't sit right at a shoreline or
+   * runway edge. 0 = point-only test (legacy).
+   */
+  clearanceM?: number;
   deps: LatticeDeps;
 }
 
@@ -217,6 +224,7 @@ export interface CutRejects {
   airport: number;  // rejected: on an airport (apron/runway)
   outCell: number;  // rejected: nearest anchor isn't this cell (search disc off the cell)
   spacing: number;  // rejected: within spacingAt of an existing point (no room)
+  clearance: number; // rejected: water/airport within the clearance margin
 }
 
 /**
@@ -244,6 +252,25 @@ export function findCut(opts: FindCutOpts, reject?: CutRejects): Coordinate | nu
     2 * haversine(anchor.location, opts.centroid),
     4 * opts.latticeM,
   );
+  // A candidate is too close to water/airport if any point on a ring at
+  // `clearanceM` is blocked — a cheap buffer so points don't hug shorelines or
+  // runway edges. 8 compass points (diagonals scaled by √½) — finer detection
+  // than the single point-in-polygon test at the candidate itself.
+  const clearanceM = opts.clearanceM ?? 0;
+  const nearBlocked = (lon: number, lat: number): boolean => {
+    const dLat = clearanceM / M_PER_DEG_LAT;
+    const dLon = clearanceM / (M_PER_DEG_LAT * Math.max(0.05, Math.cos((lat * Math.PI) / 180)));
+    const d = Math.SQRT1_2; // diagonal component so all 8 offsets sit at radius clearanceM
+    const offs: [number, number][] = [
+      [dLon, 0], [-dLon, 0], [0, dLat], [0, -dLat],
+      [dLon * d, dLat * d], [-dLon * d, dLat * d], [dLon * d, -dLat * d], [-dLon * d, -dLat * d],
+    ];
+    for (const [ox, oy] of offs) {
+      const c: Coordinate = [lon + ox, lat + oy];
+      if (deps.isWater(c) || deps.isAirport(c)) return true;
+    }
+    return false;
+  };
   let best: Coordinate | null = null;
   let bestD = Infinity;
   enumerateSamples([opts.centroid], searchR, opts.latticeM, (sample) => {
@@ -258,6 +285,9 @@ export function findCut(opts: FindCutOpts, reject?: CutRejects): Coordinate | nu
     for (const other of index.within(sample, minDist)) {
       if (haversine(sample, other.location) < minDist) { if (reject) reject.spacing++; return; }
     }
+    // Clearance last — the ring test is the most work, so only otherwise-valid
+    // candidates pay for it.
+    if (clearanceM > 0 && nearBlocked(sample[0], sample[1])) { if (reject) reject.clearance++; return; }
     const d = haversine(sample, opts.centroid);
     if (d < bestD) { bestD = d; best = sample; }
   });

@@ -1418,7 +1418,7 @@ if (!api) {
     let result: DayResult = { added: 0, removed: 0, newPoints: 0, readyCells: 0, nullCuts: 0, deltas: {} };
     // Diagnostic: why ready cells fail to place a cut this day (per-gate tally
     // over the FAILED cells only), surfaced in the heartbeat below.
-    const cutReject: CutRejects = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0 };
+    const cutReject: CutRejects = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0, clearance: 0 };
     if (field && field.city === key()) {
       try {
         result = perf.track('day', PERF_BUDGETS.day, () => runDay(
@@ -1433,18 +1433,20 @@ if (!api) {
             // Cut validity re-checks against the CURRENT points (splits earlier
             // in the same loop may have added anchors since the lattice pass).
             findCut: (anchorId, centroid) => {
-              const rej: CutRejects = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0 };
+              const rej: CutRejects = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0, clearance: 0 };
               const cut = findCut({
                 anchorId,
                 centroid,
                 anchors: [...dd.points.values()].map((p) => ({ id: p.id, location: p.location })),
-                latticeM: DEFAULT_CONFIG.LATTICE_M,
+                latticeM: DEFAULT_CONFIG.FINDCUT_LATTICE_M,
+                clearanceM: DEFAULT_CONFIG.WATER_CLEARANCE_M,
                 deps: latticeDeps(field.accessIdx, field.fit, field.water, field.airport),
               }, rej);
               if (!cut) { // tally reasons only for cells that couldn't place
                 cutReject.samples += rej.samples; cutReject.floor += rej.floor;
-                cutReject.water += rej.water; cutReject.outCell += rej.outCell;
-                cutReject.spacing += rej.spacing;
+                cutReject.water += rej.water; cutReject.airport += rej.airport;
+                cutReject.outCell += rej.outCell; cutReject.spacing += rej.spacing;
+                cutReject.clearance += rej.clearance;
               }
               return cut;
             },
@@ -1480,7 +1482,7 @@ if (!api) {
       }
       const cr = cutReject;
       const rejStr = result.nullCuts > 0
-        ? ` [reject: floor ${cr.floor} water ${cr.water} airport ${cr.airport} outCell ${cr.outCell} spacing ${cr.spacing} /${cr.samples} samples]`
+        ? ` [reject: floor ${cr.floor} water ${cr.water} airport ${cr.airport} clearance ${cr.clearance} outCell ${cr.outCell} spacing ${cr.spacing} /${cr.samples} samples]`
         : '';
       console.log(
         `${TAG} day ${day}: ${dd.points.size} pts, ${stations.length} stations, ${active} active, ` +

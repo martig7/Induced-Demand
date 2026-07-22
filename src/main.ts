@@ -604,6 +604,11 @@ if (!api) {
       return cacheId;
     };
     return rasterizeAccessFieldChunked(bbox, (lon, lat) => {
+      // Clip the paint to buildable land: a cell's Voronoi territory extends over
+      // water, but its split pressure is water-limited (integrateCells excludes
+      // it), so don't colour the lake — the spike is display-only. (Below
+      // MIN_VALUE → transparent, and skipped before the hatch check.)
+      if (f.blocked?.blockedWithin([lon, lat], 0)) return 0;
       const id = anchorAt(lon, lat);
       return id ? (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS : 0;
     }, {

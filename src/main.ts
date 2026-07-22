@@ -1057,22 +1057,29 @@ if (!api) {
   /** Download the live demand + network as JSON for the offline harness
    *  (scripts/simulate.ts). Dumps ALL stations; the harness applies the
    *  built-and-routed filter itself, matching the game. */
-  function dumpInducedData(): void {
+  async function dumpInducedData(): Promise<void> {
     try {
       const dd = api.gameState.getDemandData();
       if (!dd) return;
       const stations = api.gameState.getStations({ includeTempRoutes: false });
       const routes = api.gameState.getRoutes({ includeTempRoutes: false });
       const groups = api.gameState.getStationGroups?.() ?? [];
-      const dump = buildDump(currentCity() || 'city', dd.points.values(), stations, routes, groups);
+      // Include the raw per-city water + airport masks so the offline harness can
+      // reject cuts on/near them exactly like the game. `key()` is the data-path
+      // city (same as the field loaders); either may be absent for a city.
+      const city = key();
+      const host = window as unknown as DataServerHost;
+      const water = await loadCityJson<OceanDepthFile>(host, `/data/${city}/ocean_depth_index.json`).catch(() => null);
+      const airport = await loadCityJson<AirportFeatureCollection>(host, `/data/${city}/runways_taxiways.geojson`).catch(() => null);
+      const dump = buildDump(currentCity() || city || 'city', dd.points.values(), stations, routes, groups, water, airport);
       const blob = new Blob([JSON.stringify(dump)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `induced-dump-${(currentCity() || 'city').replace(/\W+/g, '_')}.json`;
+      a.download = `induced-dump-${(currentCity() || city || 'city').replace(/\W+/g, '_')}.json`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
-      console.log(`${TAG} dumped ${dump.points.length} points, ${dump.stations.length} stations, ${dump.routes.length} routes`);
+      console.log(`${TAG} dumped ${dump.points.length} points, ${dump.stations.length} stations, ${dump.routes.length} routes, water ${water ? 'yes' : 'no'}, airport ${airport ? 'yes' : 'no'}`);
     } catch (e) {
       console.error(`${TAG} dump failed`, e);
     }

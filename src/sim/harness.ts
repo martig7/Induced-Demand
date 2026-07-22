@@ -3,8 +3,8 @@
  * the SAME `runDay` engine the game runs, so results match the mod exactly.
  * Mirrors `main.ts`'s field wiring (the pure functions are the shared source of
  * truth; only the input plumbing differs — here it comes from a dump, not the
- * game API). Water masking is off (isWater → false) and mode shares are the
- * static snapshot from the dump.
+ * game API). Water/airport masking uses the dump's masks when present (else off);
+ * mode shares are the static snapshot from the dump.
  */
 import type { Coordinate } from '../types/core';
 import type { DemandData, Station, Route, StationGroup } from '../types/game-state';
@@ -21,6 +21,8 @@ import { buildPointSites, type Site } from '../model/field';
 import { integrateCells, findCut, type CellIntegral, type LatticeDeps } from '../model/lattice';
 import { buildJobDensity } from '../model/agglomeration';
 import { buildPopDensity } from '../model/localDensity';
+import type { WaterIndex } from '../game/waterIndex';
+import type { AirportIndex } from '../game/airportIndex';
 import { runDay, type RunDayDeps } from '../model/engine';
 import { newLedger, captureBaselines } from '../model/ledger';
 import { makeRng } from '../model/gravity';
@@ -40,11 +42,14 @@ function nativeTotals(stations: Station[], dd: DemandData, cfg: InducedDemandCon
   return { res, jobs };
 }
 
-function latticeDeps(accessIdx: AccessIndex, fit: DensityFit, cfg: InducedDemandConfig): LatticeDeps {
+function latticeDeps(
+  accessIdx: AccessIndex, fit: DensityFit, cfg: InducedDemandConfig,
+  water: WaterIndex | null, airport: AirportIndex | null,
+): LatticeDeps {
   return {
     accessAt: (c) => accessIdx.at(c),
-    isWater: () => false,
-    isAirport: () => false,
+    isWater: (c) => water?.isWater(c) ?? false,
+    isAirport: (c) => airport?.isAirport(c) ?? false,
     supportedDensity: (a) => supportedDensityAt(fit, a),
     spacingAt: (a) => spacingAt(fit, a),
     minAccess: cfg.MIN_SITE_ACCESS,
@@ -55,6 +60,7 @@ function latticeDeps(accessIdx: AccessIndex, fit: DensityFit, cfg: InducedDemand
 function buildField(
   dd: DemandData, stations: Station[], routes: Route[], groups: StationGroup[],
   frozen: { res: number; jobs: number }, cfg: InducedDemandConfig,
+  water: WaterIndex | null, airport: AirportIndex | null,
 ): { sites: Site[]; deps: RunDayDeps } {
   const graph = buildStationGraph(routes, stations, groups, cfg);
   const opps = computeOpportunities(graph, stationMasses(stations, dd.points.values(), cfg), cfg, frozen);
@@ -70,7 +76,7 @@ function buildField(
     [...dd.points.values()].map((p) => ({ id: p.id, location: p.location }));
   const cells = integrateCells({
     anchors: anchorsOf(), stations: routedCoords, catchmentM,
-    latticeM: cfg.LATTICE_M, deps: latticeDeps(accessIdx, fit, cfg),
+    latticeM: cfg.LATTICE_M, deps: latticeDeps(accessIdx, fit, cfg, water, airport),
   });
   const jobDensity = buildJobDensity(dd.points.values(), cfg);
   const popDensity = buildPopDensity(dd.points.values(), cfg.POP_DENSITY_RADIUS_M);
@@ -83,7 +89,7 @@ function buildField(
     findCut: (anchorId, centroid) => findCut({
       anchorId, centroid, anchors: anchorsOf(),
       latticeM: cfg.FINDCUT_LATTICE_M, clearanceM: cfg.WATER_CLEARANCE_M,
-      deps: latticeDeps(accessIdx, fit, cfg),
+      deps: latticeDeps(accessIdx, fit, cfg, water, airport),
     }),
   };
   return { sites, deps };
@@ -132,14 +138,14 @@ export function runSimulation(
   parsed: ParsedDump, days: number, cfg: InducedDemandConfig = DEFAULT_CONFIG,
   onDay?: (day: number, added: number, removed: number, newPoints: number) => void,
 ): SimResult {
-  const { dd, routes, groups, city } = parsed;
+  const { dd, routes, groups, city, water, airport } = parsed;
   const active = inductionStations(parsed.stations);
   const ledger = newLedger();
   captureBaselines(dd, ledger);
   const frozen = nativeTotals(active, dd, cfg); // baseline totals, frozen for Ô normalization
   const before = snapshot(dd, 0);
   for (let day = 0; day < days; day++) {
-    const field = buildField(dd, active, routes, groups, frozen, cfg);
+    const field = buildField(dd, active, routes, groups, frozen, cfg, water, airport);
     const r = runDay(dd, field.sites, ledger, cfg, makeRng((day + 1) * 0x9e3779b1 >>> 0),
       field.deps, DEFAULT_SLOT_SET, DEFAULT_DRIVING_MODEL);
     onDay?.(day, r.added, r.removed, r.newPoints);

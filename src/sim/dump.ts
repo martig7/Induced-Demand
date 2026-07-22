@@ -8,6 +8,8 @@
 import type {
   DemandData, DemandPoint, Station, Route, StationGroup, ModeChoiceStats,
 } from '../types/game-state';
+import { buildWaterIndex, type OceanDepthFile, type WaterIndex } from '../game/waterIndex';
+import { buildAirportIndex, type AirportFeatureCollection, type AirportIndex } from '../game/airportIndex';
 
 export interface DumpPoint {
   id: string; lon: number; lat: number; residents: number; jobs: number;
@@ -36,6 +38,13 @@ export interface DumpFile {
   stations: DumpStation[];
   routes: DumpRoute[];
   groups: { id: string; stationIds: string[] }[];
+  /**
+   * Raw per-city placement masks (optional), so the offline harness can reject
+   * cuts on/near water and airports exactly like the game — otherwise it runs
+   * with masking off. Large (city water polygons), so only present when dumped.
+   */
+  water?: OceanDepthFile;
+  airport?: AirportFeatureCollection;
 }
 
 const ZERO_MODE: ModeChoiceStats = { walking: 0, driving: 0, transit: 0, unknown: 0 };
@@ -47,6 +56,8 @@ export function buildDump(
   stations: Station[],
   routes: Route[],
   groups: StationGroup[],
+  water?: OceanDepthFile | null,
+  airport?: AirportFeatureCollection | null,
 ): DumpFile {
   const dumpPoints: DumpPoint[] = [];
   for (const p of points) {
@@ -74,6 +85,8 @@ export function buildDump(
       idealTrainCount: r.idealTrainCount,
     })),
     groups: groups.map((g) => ({ id: g.id, stationIds: g.stationIds })),
+    ...(water ? { water } : {}),
+    ...(airport ? { airport } : {}),
   };
 }
 
@@ -83,6 +96,9 @@ export interface ParsedDump {
   stations: Station[];
   routes: Route[];
   groups: StationGroup[];
+  /** Rebuilt placement masks from the dump, or null when the dump carried none. */
+  water: WaterIndex | null;
+  airport: AirportIndex | null;
 }
 
 /** Harness side: reconstruct the model inputs from a dump. */
@@ -129,5 +145,9 @@ export function parseDump(f: DumpFile): ParsedDump {
   });
 
   const groups: StationGroup[] = f.groups.map((g) => ({ id: g.id, stationIds: g.stationIds }));
-  return { city: f.city, dd, stations, routes, groups };
+  return {
+    city: f.city, dd, stations, routes, groups,
+    water: f.water ? buildWaterIndex(f.water) : null,
+    airport: f.airport ? buildAirportIndex(f.airport) : null,
+  };
 }

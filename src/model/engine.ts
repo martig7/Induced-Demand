@@ -47,8 +47,9 @@ export interface RunDayDeps {
   /** Normalized [0,1] local job density for the agglomeration boost; absent → 0. */
   jobDensity?(c: Coordinate): number;
   /**
-   * Local population density (people/m², residents + jobs) for the split-headroom
-   * gate; absent → no gate (headroom 1). See TARGET_POP_DENSITY_PER_KM2.
+   * Local RESIDENTIAL density (residents/m²) for the split-headroom gate; absent
+   * → no gate (headroom 1). Residents only so job cores stay ungated and
+   * agglomeration can still concentrate there. See TARGET_POP_DENSITY_PER_KM2.
    */
   popDensity?(c: Coordinate): number;
 }

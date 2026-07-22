@@ -1,12 +1,12 @@
 /**
- * Local population-density field: total demand mass (residents + jobs) per m²
- * within a build radius of a location, grid-bucketed at that radius so `at()`
- * scans only a 3×3 ring. Drives the split-readiness HEADROOM gate — a cell stops
- * accruing split pressure where local density already meets the target, so a
- * dense city (NYC) adds few new demand points while a sparse one (Denver)
- * subdivides toward the target. Unlike agglomeration's normalized [0,1] job
- * density, this is ABSOLUTE people/m², comparable across cities against the
- * target.
+ * Local population-density field: RESIDENTS per m² within a build radius of a
+ * location, grid-bucketed at that radius so `at()` scans only a 3×3 ring. Drives
+ * the split-readiness HEADROOM gate — a cell stops accruing split pressure where
+ * local RESIDENTIAL density already meets the target, so residentially-dense
+ * areas add few new points while sparse ones subdivide. Residents only (not
+ * jobs) so that job cores — downtowns with many jobs but few residents — stay
+ * ungated and job AGGLOMERATION can still build big centers there; the gate only
+ * throttles housing sprawl. Absolute people/m², comparable across cities.
  */
 import type { Coordinate } from '../types/core';
 import type { DemandPoint } from '../types/game-state';
@@ -15,7 +15,7 @@ import { haversine } from './geo';
 const M_PER_DEG_LAT = 111194.9;
 
 export interface PopDensity {
-  /** Existing people (residents + jobs) per m² within the build radius of `c`. */
+  /** Existing RESIDENTS per m² within the build radius of `c`. */
   at(c: Coordinate): number;
 }
 
@@ -40,7 +40,7 @@ export function buildPopDensity(points: Iterable<DemandPoint>, radiusM: number):
       for (let dx = -1; dx <= 1; dx++) {
         for (let dy = -1; dy <= 1; dy++) {
           for (const p of grid.get(`${cx + dx},${cy + dy}`) ?? []) {
-            if (haversine(c, p.location) <= radiusM) mass += p.residents + p.jobs;
+            if (haversine(c, p.location) <= radiusM) mass += p.residents;
           }
         }
       }

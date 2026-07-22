@@ -134,13 +134,14 @@ export interface InducedDemandConfig {
    */
   SPLIT_PRESSURE_DECAY: number;
   /**
-   * Split HEADROOM target: local population density (people per km², residents +
-   * jobs) at or above which a cell stops accruing split pressure. Readiness is
-   * multiplied by `headroom = clamp01(1 − localDensity/target)`, so a city
-   * already at/above the target adds few new demand points while a sparse one
-   * subdivides toward it — the density-DIFFERENTIAL lever (dense NYC splits
-   * little, sparse Denver more). Measured over POP_DENSITY_RADIUS_M. Lower =
-   * fewer new points; a very high value disables the gate (headroom ≈ 1).
+   * Split HEADROOM target: local RESIDENTIAL density (residents per km²) at or
+   * above which a cell stops accruing split pressure. Readiness is multiplied by
+   * `headroom = clamp01(1 − localResDensity/target)`, so residentially-dense
+   * areas add few new demand points while sparse ones subdivide toward the
+   * target — the density-DIFFERENTIAL lever (dense NYC splits little, sparse
+   * Denver more). Residents only (not jobs), so job cores stay ungated and
+   * agglomeration still concentrates there. Measured over POP_DENSITY_RADIUS_M.
+   * Lower = fewer new points; a very high value disables the gate (headroom ≈ 1).
    */
   TARGET_POP_DENSITY_PER_KM2: number;
   /** Neighborhood radius (m) for the local population-density headroom measure. */

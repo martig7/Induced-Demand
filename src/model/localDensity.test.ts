@@ -8,10 +8,10 @@ const pt = (id: string, lon: number, lat: number, residents: number, jobs: numbe
   id, location: [lon, lat], residents, jobs, popIds: [], residentModeShare: ZERO, workerModeShare: ZERO,
 });
 
-test('buildPopDensity: people/m² = (residents + jobs) within the radius ÷ disc area', () => {
+test('buildPopDensity: residents/m² within the radius ÷ disc area (jobs excluded)', () => {
   const R = 600;
   const pd = buildPopDensity([pt('a', 0, 0, 3000, 5000)], R);
-  assert.ok(Math.abs(pd.at([0, 0]) - 8000 / (Math.PI * R * R)) < 1e-12, 'at the point');
+  assert.ok(Math.abs(pd.at([0, 0]) - 3000 / (Math.PI * R * R)) < 1e-12, 'residents only, jobs ignored');
   assert.equal(pd.at([1, 1]), 0, 'far outside every radius → 0');
 });
 

@@ -176,6 +176,22 @@ test('rasterizeAccessField: all-zero field is empty; degenerate bbox is empty', 
   assert.equal(rasterizeAccessField([0, 0, 0, 0], () => 0.9, { gridMax: 8 }).empty, true);
 });
 
+test('rasterizeAccessFieldChunked: byte-identical to the sync raw path, any slice size', async () => {
+  const { rasterizeAccessFieldChunked } = await import('./heatmap');
+  const valueAt = (lon: number, lat: number) => (lon > 0.3 && lat < 0.7 ? 0.2 + lon * 0.5 : 0);
+  const hatchAt = (lon: number) => lon > 0.6;
+  const sync = rasterizeAccessField([0, 0, 1, 1], valueAt, { gridMax: 30, hatchAt });
+  for (const sliceRows of [1, 7, 1000]) {
+    const chunked = await rasterizeAccessFieldChunked([0, 0, 1, 1], valueAt, {
+      gridMax: 30, hatchAt, sliceRows, yieldFn: () => Promise.resolve(),
+    });
+    assert.equal(chunked.width, sync.width);
+    assert.equal(chunked.height, sync.height);
+    assert.equal(chunked.empty, sync.empty);
+    assert.deepEqual(Array.from(chunked.data), Array.from(sync.data), `sliceRows=${sliceRows}`);
+  }
+});
+
 test('rasterizeAccessField: hatchAt punches transparent diagonal stripes into a solid fill', () => {
   const solid = rasterizeAccessField([0, 0, 1, 1], () => 0.9, { gridMax: 20 });
   const hatched = rasterizeAccessField([0, 0, 1, 1], () => 0.9, { gridMax: 20, hatchAt: () => true });

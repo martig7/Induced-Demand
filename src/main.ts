@@ -65,7 +65,8 @@ import { recreateMaterializedPoints } from './model/ledger';
 import { createPerfTracker, PERF_BUDGETS } from './model/perf';
 import {
   registerHeatmap, updateHeatmap, setHeatmapVisible, buildHeatFeatures,
-  rasterizeField, rasterizeAccessField, type HeatView, type FieldRaster,
+  rasterizeField, rasterizeAccessField, rasterizeAccessFieldChunked,
+  type HeatView, type FieldRaster,
 } from './overlay/heatmap';
 
 const TAG = '[InducedDemand]';
@@ -587,7 +588,10 @@ if (!api) {
   // Cells-view raster cache, keyed by heatRev (invalidated on every rebuild/growth
   // day). Pre-warmed after each day when the overlay is enabled, so SWITCHING to
   // the cells view shows the cached image instantly instead of baking on open.
+  // The bake itself is async + time-sliced (never blocks a frame); cellsBaking
+  // dedupes concurrent bakes.
   let cellsCache: { rev: number; raster: FieldRaster } | null = null;
+  let cellsBaking = false;
   const rafSchedule = (fn: () => void): void => {
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn);
     else setTimeout(fn, 16);
@@ -604,9 +608,11 @@ if (!api) {
   /**
    * Bake the cells-view raster (nearest-anchor Voronoi cells colored by split
    * pressure, hatched where uncuttable). Costly — a per-pixel nearest-anchor
-   * lookup over the catchment grid — so its result is cached by heatRev.
+   * lookup over the catchment grid — so it's baked ASYNC + time-sliced (yields to
+   * a frame between row bands) and never blocks the main thread for the whole
+   * bake. Result is cached by heatRev (see scheduleCellsBake).
    */
-  function bakeCellsRaster(f: NonNullable<NonNullable<typeof wSession[typeof SESSION_KEY]>['field']>): FieldRaster {
+  function bakeCellsRaster(f: NonNullable<NonNullable<typeof wSession[typeof SESSION_KEY]>['field']>): Promise<FieldRaster> {
     const ddNow = api.gameState.getDemandData();
     const anchorIndex = createAnchorIndex(
       [...(ddNow?.points.values() ?? [])].map((p) => ({ id: p.id, location: p.location })),
@@ -621,7 +627,7 @@ if (!api) {
       }
       return cacheId;
     };
-    return rasterizeAccessField(bbox, (lon, lat) => {
+    return rasterizeAccessFieldChunked(bbox, (lon, lat) => {
       const id = anchorAt(lon, lat);
       return id ? (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS : 0;
     }, {
@@ -632,32 +638,40 @@ if (!api) {
         const id = anchorAt(lon, lat);
         return !!id && (ledger.cells?.[id] ?? 0) >= DEFAULT_CONFIG.TARGET_SPLIT_DAYS;
       },
+      yieldFn: () => new Promise<void>((r) => rafSchedule(r)),
     });
-  }
-
-  /** Cached cells raster for the current heatRev, baking + storing on a miss. */
-  function cellsRaster(f: NonNullable<NonNullable<typeof wSession[typeof SESSION_KEY]>['field']>): FieldRaster {
-    if (cellsCache?.rev === heatRev) return cellsCache.raster;
-    const raster = bakeCellsRaster(f);
-    cellsCache = { rev: heatRev, raster };
-    return raster;
   }
 
   /**
-   * Pre-bake the cells raster for the current day into the cache, so a later
-   * switch to the cells view is instant. Runs on a deferred frame (after the
-   * active view renders) and only while the overlay is enabled — so it costs one
-   * extra bake per day ONLY when the overlay is open on a non-cells view; nothing
-   * when the overlay is off or cells is already the active (already-baked) view.
+   * Ensure the cells raster is baked for the current heatRev. The bake is async
+   * and time-sliced, so this NEVER blocks a frame. One bake at a time (cellsBaking
+   * dedupes); on completion it caches the result and re-renders if cells is the
+   * active view — and, if the content moved on mid-bake, kicks a fresh bake.
+   */
+  function scheduleCellsBake(f: NonNullable<NonNullable<typeof wSession[typeof SESSION_KEY]>['field']>): void {
+    if (cellsCache?.rev === heatRev || cellsBaking) return;
+    cellsBaking = true;
+    const rev = heatRev;
+    bakeCellsRaster(f).then((raster) => {
+      cellsBaking = false;
+      cellsCache = { rev, raster };
+      if (!isCurrent()) return;
+      const f2 = wSession[SESSION_KEY]?.field;
+      if (heatRev !== rev && f2 && f2.city === key()) scheduleCellsBake(f2); // content changed while baking
+      refreshHeatmap(); // display it if cells is the active view (cache now fresh for `rev`)
+    }).catch(() => { cellsBaking = false; });
+  }
+
+  /**
+   * Pre-bake the cells raster for the current day into the cache while the
+   * overlay is enabled, so a later switch to the cells view is instant. The bake
+   * is async + sliced across frames, so it costs no frame stall — just a little
+   * background work per day when the overlay is open (nothing when it's off).
    */
   function prewarmCells(): void {
     if (!overlayStore.get().enabled) return;
-    if (cellsCache?.rev === heatRev) return;
-    rafSchedule(() => {
-      if (!isCurrent() || !overlayStore.get().enabled || cellsCache?.rev === heatRev) return;
-      const f = wSession[SESSION_KEY]?.field;
-      if (f && f.city === key()) cellsCache = { rev: heatRev, raster: bakeCellsRaster(f) };
-    });
+    const f = wSession[SESSION_KEY]?.field;
+    if (f && f.city === key()) scheduleCellsBake(f);
   }
 
   function doHeatmapRefresh(): void {
@@ -671,7 +685,8 @@ if (!api) {
     }
     const heatKey = `${view}:${heatRev}`;
     if (heatKey !== lastHeatKey) { // re-bake only when content changed
-      let raster: FieldRaster;
+      let raster: FieldRaster | null = null;
+      let staleCells = false; // showing a not-yet-fresh cells image while it bakes
       if (view === 'accessRes' || view === 'accessCom') {
         // Access views: bake the CONTINUOUS field from the access index over the
         // station catchments — so access shows everywhere it exists, including
@@ -686,9 +701,16 @@ if (!api) {
         }, { contrast: true }); // normalize + gamma-lift so a low-max field still reads
       } else if (view === 'cells') {
         // Cells view: each Voronoi cell (nearest-anchor region) colored by its
-        // split pressure / threshold (hot = about to spawn a point). Cached by
-        // heatRev (see cellsRaster/prewarmCells) so opening the view is instant.
-        raster = cellsRaster(f);
+        // split pressure / threshold. Baked async + cached by heatRev, so a fresh
+        // cache renders instantly; otherwise show the last (stale) image while the
+        // bake runs (never blocking a frame) and re-render when it lands.
+        if (cellsCache?.rev === heatRev) {
+          raster = cellsCache.raster;
+        } else {
+          scheduleCellsBake(f);
+          raster = cellsCache?.raster ?? null;
+          staleCells = true; // don't finalize heatKey — refresh again when the bake completes
+        }
       } else {
         // Pressure view: pop pressure at points + split pressure at each cell's
         // prospective cut location. APPROXIMATION: the cut marker uses the raw
@@ -703,9 +725,13 @@ if (!api) {
           }));
         raster = rasterizeField(buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG, cuts).features);
       }
-      updateHeatmap(api, raster);
-      lastHeatEmpty = raster.empty;
-      lastHeatKey = heatKey;
+      if (raster) {
+        updateHeatmap(api, raster);
+        lastHeatEmpty = raster.empty;
+      }
+      // Finalize the key only once the CURRENT content is shown; a stale cells
+      // image leaves it so the bake's completion re-render fires.
+      if (raster && !staleCells) lastHeatKey = heatKey;
     }
     setHeatmapVisible(api, !lastHeatEmpty); // an empty view shows nothing, not a stale image
   }

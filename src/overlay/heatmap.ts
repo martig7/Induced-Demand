@@ -337,6 +337,65 @@ export function rasterizeAccessField(
   return { data, width, height, bbox, empty: !any };
 }
 
+/**
+ * Async, TIME-SLICED twin of rasterizeAccessField's RAW path (the cells view):
+ * renders the grid in horizontal bands of `sliceRows`, awaiting `yieldFn`
+ * between bands so the main thread never blocks for the whole bake — the game
+ * keeps rendering while the raster fills in over a few frames. Produces output
+ * byte-identical to the sync raw path (no contrast). `yieldFn` hands control
+ * back to the event loop (default: a macrotask); pass a rAF-based yield to align
+ * slices to frames, or a resolved promise in tests for determinism.
+ *
+ * Keep the per-pixel body IN SYNC with rasterizeAccessField's raw loop above
+ * (covered by an equivalence test).
+ */
+export async function rasterizeAccessFieldChunked(
+  bbox: [number, number, number, number],
+  valueAt: (lon: number, lat: number) => number,
+  opts: {
+    gridMax?: number;
+    hatchAt?: (lon: number, lat: number) => boolean;
+    sliceRows?: number;
+    yieldFn?: () => Promise<void>;
+  } = {},
+): Promise<FieldRaster> {
+  const gridMax = opts.gridMax ?? ACCESS_GRID_MAX;
+  const [w, s, e, n] = bbox;
+  const spanLon = e - w, spanLat = n - s;
+  if (spanLon <= 0 || spanLat <= 0) return EMPTY_RASTER;
+  const midLat = (s + n) / 2;
+  const mPerLon = M_PER_DEG_LAT * Math.max(0.05, Math.cos((midLat * Math.PI) / 180));
+  const aspect = (spanLon * mPerLon) / (spanLat * M_PER_DEG_LAT);
+  const width = aspect >= 1 ? gridMax : Math.max(1, Math.round(gridMax * aspect));
+  const height = aspect >= 1 ? Math.max(1, Math.round(gridMax / aspect)) : gridMax;
+  const lonAt = (x: number): number => w + ((x + 0.5) / width) * spanLon;
+  const latAt = (y: number): number => n - ((y + 0.5) / height) * spanLat;
+  const sliceRows = Math.max(1, opts.sliceRows ?? 24);
+  const yieldFn = opts.yieldFn ?? ((): Promise<void> => new Promise((r) => setTimeout(r, 0)));
+
+  const data = new Uint8ClampedArray(width * height * 4);
+  let any = false;
+  for (let y0 = 0; y0 < height; y0 += sliceRows) {
+    const y1 = Math.min(height, y0 + sliceRows);
+    for (let y = y0; y < y1; y++) {
+      const lat = latAt(y);
+      for (let x = 0; x < width; x++) {
+        const lon = lonAt(x);
+        const v = clamp01(valueAt(lon, lat));
+        if (v < MIN_VALUE) continue;
+        if (opts.hatchAt?.(lon, lat) && (((x + y) >> 2) & 1) === 0) continue;
+        any = true;
+        const [r, g, b] = rampColor(v);
+        const o = (y * width + x) * 4;
+        data[o] = r; data[o + 1] = g; data[o + 2] = b;
+        data[o + 3] = Math.round(255 * clamp01((v - MIN_VALUE) / ALPHA_FADE));
+      }
+    }
+    if (y1 < height) await yieldFn();
+  }
+  return { data, width, height, bbox, empty: !any };
+}
+
 // --- Map integration (DOM/MapLibre shell) ------------------------------------
 
 interface MapLike {

@@ -1,11 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  fitDensity, spacingAt, massAt, massResAt, massJobAt, type FitInputPoint,
+  fitDensity, spacingAt, massAt, massResAt, massJobAt, targetSpacingAt, type FitInputPoint,
 } from './densityFit';
 import { DEFAULT_CONFIG } from './config';
 
 const cfg = DEFAULT_CONFIG;
+
+test('targetSpacingAt: absolute curve — R_MAX at access 0, TARGET_SPACING_FULL_M at 1, clamped, monotone', () => {
+  assert.equal(targetSpacingAt(0, cfg), cfg.R_MAX);
+  assert.equal(targetSpacingAt(1, cfg), cfg.TARGET_SPACING_FULL_M);
+  // Monotone non-increasing with access (denser as access rises).
+  assert.ok(targetSpacingAt(0.3, cfg) > targetSpacingAt(0.7, cfg));
+  // Clamped to [R_MIN, R_MAX] regardless of input.
+  assert.equal(targetSpacingAt(-5, cfg), cfg.R_MAX);
+  const tiny = { ...cfg, TARGET_SPACING_FULL_M: 10 }; // below R_MIN
+  assert.equal(targetSpacingAt(1, tiny), cfg.R_MIN);
+  // Independent of the city: same value whatever the fixture density.
+  assert.equal(targetSpacingAt(0.5, cfg), cfg.R_MAX - (cfg.R_MAX - cfg.TARGET_SPACING_FULL_M) * 0.5);
+});
 
 /** Synthetic city: dense high-access core (tight spacing, heavy mass), sparse low-access edge. */
 function city(): FitInputPoint[] {

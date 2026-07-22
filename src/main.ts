@@ -46,7 +46,7 @@ import {
   type StationOpportunity, type AccessIndex,
 } from './model/opportunity';
 import {
-  fitDensity, massResAt, massJobAt, spacingAt, supportedDensityAt,
+  fitDensity, massResAt, massJobAt, targetSpacingAt, supportedDensityAt,
   type DensityFit, type FitInputPoint,
 } from './model/densityFit';
 import {
@@ -399,7 +399,7 @@ if (!api) {
       isWater: (c) => water?.isWater(c) ?? false,
       isAirport: (c) => airport?.isAirport(c) ?? false,
       supportedDensity: (a) => supportedDensityAt(fit, a),
-      spacingAt: (a) => spacingAt(fit, a),
+      spacingAt: (a) => targetSpacingAt(a, DEFAULT_CONFIG),
       minAccess: DEFAULT_CONFIG.MIN_SITE_ACCESS,
     };
   }

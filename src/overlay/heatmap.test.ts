@@ -176,19 +176,22 @@ test('rasterizeAccessField: all-zero field is empty; degenerate bbox is empty', 
   assert.equal(rasterizeAccessField([0, 0, 0, 0], () => 0.9, { gridMax: 8 }).empty, true);
 });
 
-test('rasterizeAccessFieldChunked: byte-identical to the sync raw path, any slice size', async () => {
+test('rasterizeAccessFieldChunked: byte-identical to the sync raw path, any slice cadence', async () => {
   const { rasterizeAccessFieldChunked } = await import('./heatmap');
   const valueAt = (lon: number, lat: number) => (lon > 0.3 && lat < 0.7 ? 0.2 + lon * 0.5 : 0);
   const hatchAt = (lon: number) => lon > 0.6;
   const sync = rasterizeAccessField([0, 0, 1, 1], valueAt, { gridMax: 30, hatchAt });
-  for (const sliceRows of [1, 7, 1000]) {
+  // Injected monotonic clock: sliceMs=0 yields after every row, a huge budget never yields.
+  const clock = () => { let t = 0; return () => (t += 1); };
+  for (const sliceMs of [0, 1e9]) {
+    let yields = 0;
     const chunked = await rasterizeAccessFieldChunked([0, 0, 1, 1], valueAt, {
-      gridMax: 30, hatchAt, sliceRows, yieldFn: () => Promise.resolve(),
+      gridMax: 30, hatchAt, sliceMs, now: clock(), yieldFn: () => { yields++; return Promise.resolve(); },
     });
-    assert.equal(chunked.width, sync.width);
-    assert.equal(chunked.height, sync.height);
+    assert.deepEqual(Array.from(chunked.data), Array.from(sync.data), `sliceMs=${sliceMs} pixels`);
     assert.equal(chunked.empty, sync.empty);
-    assert.deepEqual(Array.from(chunked.data), Array.from(sync.data), `sliceRows=${sliceRows}`);
+    if (sliceMs === 0) assert.ok(yields > 0, 'a zero budget yields between rows');
+    if (sliceMs === 1e9) assert.equal(yields, 0, 'a huge budget never yields');
   }
 });
 

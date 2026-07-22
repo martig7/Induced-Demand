@@ -339,12 +339,14 @@ export function rasterizeAccessField(
 
 /**
  * Async, TIME-SLICED twin of rasterizeAccessField's RAW path (the cells view):
- * renders the grid in horizontal bands of `sliceRows`, awaiting `yieldFn`
- * between bands so the main thread never blocks for the whole bake — the game
- * keeps rendering while the raster fills in over a few frames. Produces output
- * byte-identical to the sync raw path (no contrast). `yieldFn` hands control
- * back to the event loop (default: a macrotask); pass a rAF-based yield to align
- * slices to frames, or a resolved promise in tests for determinism.
+ * renders rows until ~`sliceMs` of wall time elapses, then awaits `yieldFn`, so
+ * NO single frame does more than a few ms of bake — regardless of grid size or
+ * anchor density (a fixed row count stalls dense cities, where each pixel's
+ * nearest-anchor lookup costs more). The game keeps rendering while the raster
+ * fills in over a few frames. Output is byte-identical to the sync raw path (no
+ * contrast). `yieldFn` hands control back to the event loop (default: a
+ * macrotask, which lets the browser paint between slices); `now` is injectable
+ * for deterministic tests.
  *
  * Keep the per-pixel body IN SYNC with rasterizeAccessField's raw loop above
  * (covered by an equivalence test).
@@ -355,7 +357,8 @@ export async function rasterizeAccessFieldChunked(
   opts: {
     gridMax?: number;
     hatchAt?: (lon: number, lat: number) => boolean;
-    sliceRows?: number;
+    sliceMs?: number;
+    now?: () => number;
     yieldFn?: () => Promise<void>;
   } = {},
 ): Promise<FieldRaster> {
@@ -370,28 +373,34 @@ export async function rasterizeAccessFieldChunked(
   const height = aspect >= 1 ? Math.max(1, Math.round(gridMax / aspect)) : gridMax;
   const lonAt = (x: number): number => w + ((x + 0.5) / width) * spanLon;
   const latAt = (y: number): number => n - ((y + 0.5) / height) * spanLat;
-  const sliceRows = Math.max(1, opts.sliceRows ?? 24);
+  const sliceMs = Math.max(0, opts.sliceMs ?? 5);
+  const now = opts.now ?? (typeof performance !== 'undefined' && performance.now
+    ? (): number => performance.now()
+    : (): number => Date.now());
   const yieldFn = opts.yieldFn ?? ((): Promise<void> => new Promise((r) => setTimeout(r, 0)));
 
   const data = new Uint8ClampedArray(width * height * 4);
   let any = false;
-  for (let y0 = 0; y0 < height; y0 += sliceRows) {
-    const y1 = Math.min(height, y0 + sliceRows);
-    for (let y = y0; y < y1; y++) {
-      const lat = latAt(y);
-      for (let x = 0; x < width; x++) {
-        const lon = lonAt(x);
-        const v = clamp01(valueAt(lon, lat));
-        if (v < MIN_VALUE) continue;
-        if (opts.hatchAt?.(lon, lat) && (((x + y) >> 2) & 1) === 0) continue;
-        any = true;
-        const [r, g, b] = rampColor(v);
-        const o = (y * width + x) * 4;
-        data[o] = r; data[o + 1] = g; data[o + 2] = b;
-        data[o + 3] = Math.round(255 * clamp01((v - MIN_VALUE) / ALPHA_FADE));
-      }
+  let sliceStart = now();
+  for (let y = 0; y < height; y++) {
+    const lat = latAt(y);
+    for (let x = 0; x < width; x++) {
+      const lon = lonAt(x);
+      const v = clamp01(valueAt(lon, lat));
+      if (v < MIN_VALUE) continue;
+      if (opts.hatchAt?.(lon, lat) && (((x + y) >> 2) & 1) === 0) continue;
+      any = true;
+      const [r, g, b] = rampColor(v);
+      const o = (y * width + x) * 4;
+      data[o] = r; data[o + 1] = g; data[o + 2] = b;
+      data[o + 3] = Math.round(255 * clamp01((v - MIN_VALUE) / ALPHA_FADE));
     }
-    if (y1 < height) await yieldFn();
+    // Yield once this synchronous run has spent its time budget — adaptive, so a
+    // dense city processes fewer rows per slice but each slice stays ~sliceMs.
+    if (y + 1 < height && now() - sliceStart >= sliceMs) {
+      await yieldFn();
+      sliceStart = now();
+    }
   }
   return { data, width, height, bbox, empty: !any };
 }

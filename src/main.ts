@@ -638,7 +638,8 @@ if (!api) {
         const id = anchorAt(lon, lat);
         return !!id && (ledger.cells?.[id] ?? 0) >= DEFAULT_CONFIG.TARGET_SPLIT_DAYS;
       },
-      yieldFn: () => new Promise<void>((r) => rafSchedule(r)),
+      // Default (setTimeout) yield: lets the browser paint between ~5 ms slices,
+      // rather than a rAF yield that runs the slice at frame start next to paint.
     });
   }
 

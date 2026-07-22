@@ -10,8 +10,7 @@ import {
 // hand-checkable integrals: supportedDensity = 1e-3 people/m².
 const DEPS: LatticeDeps = {
   accessAt: () => ({ res: 0.8, com: 0.8 }),
-  isWater: () => false,
-  isAirport: () => false,
+  blockedWithin: () => false,
   supportedDensity: () => 1e-3,
   spacingAt: () => 300,
   minAccess: 0.05,
@@ -86,7 +85,7 @@ test('findCut: returns a dry, min-spaced sample in the cell near the centroid', 
 
 test('findCut: null when water or spacing exclude every sample', () => {
   const a = anchors([['p1', 0, 0]]);
-  const wet: LatticeDeps = { ...DEPS, isWater: () => true };
+  const wet: LatticeDeps = { ...DEPS, blockedWithin: () => true };
   const cells = integrateCells({
     anchors: a, stations: [[0, 0]], catchmentM: 800, latticeM: 250, deps: DEPS,
   });
@@ -96,18 +95,18 @@ test('findCut: null when water or spacing exclude every sample', () => {
   assert.equal(cut, null);
 });
 
-test('findCut: airport excludes every sample and tallies the reason', () => {
+test('findCut: a fully-blocked cell excludes every sample and tallies the reason', () => {
   const a = anchors([['p1', 0, 0]]);
-  const onAirport: LatticeDeps = { ...DEPS, isAirport: () => true };
+  const blocked: LatticeDeps = { ...DEPS, blockedWithin: () => true };
   const cells = integrateCells({
     anchors: a, stations: [[0, 0]], catchmentM: 800, latticeM: 250, deps: DEPS,
   });
-  const reject = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0, clearance: 0 };
+  const reject = { samples: 0, floor: 0, blocked: 0, outCell: 0, spacing: 0, clearance: 0 };
   const cut = findCut({
-    anchorId: 'p1', centroid: cells.get('p1')!.centroid!, anchors: a, latticeM: 250, deps: onAirport,
+    anchorId: 'p1', centroid: cells.get('p1')!.centroid!, anchors: a, latticeM: 250, deps: blocked,
   }, reject);
   assert.equal(cut, null);
-  assert.ok(reject.airport > 0 && reject.airport === reject.samples, 'all samples rejected as airport');
+  assert.ok(reject.blocked > 0 && reject.blocked === reject.samples, 'all samples rejected as blocked');
 });
 
 test('findCut: clearance margin rejects candidates hugging a shoreline', () => {
@@ -116,11 +115,12 @@ test('findCut: clearance margin rejects candidates hugging a shoreline', () => {
     anchors: a, stations: [[0, 0]], catchmentM: 800, latticeM: 250, deps: DEPS,
   });
   const M = 1 / 111194.9; // deg per metre (lat)
-  // Dry only in a thin |lat| < 100 m horizontal strip; everything else water.
-  const strip: LatticeDeps = { ...DEPS, isWater: ([, lat]) => Math.abs(lat) >= 100 * M };
+  // Dry only in a thin |lat| < 100 m horizontal strip; water is within r of a
+  // point once the disc's far edge reaches |lat| = 100 m, i.e. |lat| ≥ (100−r).
+  const strip: LatticeDeps = { ...DEPS, blockedWithin: ([, lat], r) => Math.abs(lat) >= (100 - r) * M };
   const centroid = cells.get('p1')!.centroid!;
   const dry = findCut({ anchorId: 'p1', centroid, anchors: a, latticeM: 150, deps: strip });
-  const reject = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0, clearance: 0 };
+  const reject = { samples: 0, floor: 0, blocked: 0, outCell: 0, spacing: 0, clearance: 0 };
   const clear = findCut({
     anchorId: 'p1', centroid, anchors: a, latticeM: 150, clearanceM: 120, deps: strip,
   }, reject);

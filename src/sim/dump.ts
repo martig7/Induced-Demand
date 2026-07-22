@@ -8,8 +8,8 @@
 import type {
   DemandData, DemandPoint, Station, Route, StationGroup, ModeChoiceStats,
 } from '../types/game-state';
-import { buildWaterIndex, type OceanDepthFile, type WaterIndex } from '../game/waterIndex';
-import { buildAirportIndex, type AirportFeatureCollection, type AirportIndex } from '../game/airportIndex';
+import type { OceanDepthFile } from '../game/waterIndex';
+import type { AirportFeatureCollection } from '../game/airportIndex';
 
 export interface DumpPoint {
   id: string; lon: number; lat: number; residents: number; jobs: number;
@@ -96,9 +96,10 @@ export interface ParsedDump {
   stations: Station[];
   routes: Route[];
   groups: StationGroup[];
-  /** Rebuilt placement masks from the dump, or null when the dump carried none. */
-  water: WaterIndex | null;
-  airport: AirportIndex | null;
+  /** Raw masks from the dump (null when absent); the harness scan-fills the
+   *  blocked raster from these, matching the game. */
+  waterFile: OceanDepthFile | null;
+  airportFile: AirportFeatureCollection | null;
 }
 
 /** Harness side: reconstruct the model inputs from a dump. */
@@ -147,7 +148,7 @@ export function parseDump(f: DumpFile): ParsedDump {
   const groups: StationGroup[] = f.groups.map((g) => ({ id: g.id, stationIds: g.stationIds }));
   return {
     city: f.city, dd, stations, routes, groups,
-    water: f.water ? buildWaterIndex(f.water) : null,
-    airport: f.airport ? buildAirportIndex(f.airport) : null,
+    waterFile: f.water ?? null,
+    airportFile: f.airport ?? null,
   };
 }

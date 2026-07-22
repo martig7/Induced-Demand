@@ -57,8 +57,9 @@ import {
   buildPointSites, refreshSiteAccess, computeStructuralHash, computeServiceHash,
   type Site,
 } from './model/field';
-import { buildWaterIndex, type WaterIndex, type OceanDepthFile } from './game/waterIndex';
-import { buildAirportIndex, type AirportIndex, type AirportFeatureCollection } from './game/airportIndex';
+import type { OceanDepthFile } from './game/waterIndex';
+import type { AirportFeatureCollection } from './game/airportIndex';
+import { buildBlockedRasterFromFiles, type BlockedRaster } from './game/blockedRaster';
 import { buildJobDensity, type JobDensity } from './model/agglomeration';
 import { buildPopDensity, type PopDensity } from './model/localDensity';
 import { recreateMaterializedPoints } from './model/ledger';
@@ -161,10 +162,9 @@ if (!api) {
       serviceHash: string;
       /** People added/removed since the last opportunity compute (drift refresh). */
       massDrift: number;
-      water: WaterIndex | null;
-      waterFailed: boolean;
-      airport: AirportIndex | null;
-      airportFailed: boolean;
+      /** Fine water + airport blocked raster for split placement; null = no mask. */
+      blocked: BlockedRaster | null;
+      blockedFailed: boolean;
       /** Local job-density field for the agglomeration score boost. */
       jobDensity: JobDensity;
       /** Local population-density field for the split-headroom gate. */
@@ -196,35 +196,25 @@ if (!api) {
     (m) => console.warn(m),
   );
 
-  /** Water index, one load attempt per city; null = no mask (warned once). */
-  async function loadWaterIndex(city: string): Promise<WaterIndex | null> {
+  /**
+   * Fine water + airport blocked raster, one load+build attempt per city; null =
+   * no mask (warned once). Scan-fills the raw ocean_depth_index + runways polygons
+   * into a bit-per-cell mask that findCut queries by disc.
+   */
+  async function loadBlockedRaster(city: string): Promise<BlockedRaster | null> {
     const start = performance.now();
-    try {
-      const file = await loadCityJson<OceanDepthFile>(
-        window as unknown as DataServerHost, `/data/${city}/ocean_depth_index.json`,
-      );
-      const idx = buildWaterIndex(file);
-      const ms = performance.now() - start;
-      if (DEBUG) console.log(`[InducedDemand][perf] water ${ms.toFixed(0)}ms (${file.depths.length} polys)`);
-      if (ms > PERF_BUDGETS.water) console.warn(`${TAG} water index load over budget: ${ms.toFixed(0)}ms`);
-      return idx;
-    } catch (e) {
-      console.warn(`${TAG} no ocean_depth_index for ${city} — placing without a water mask`, e);
+    const host = window as unknown as DataServerHost;
+    const water = await loadCityJson<OceanDepthFile>(host, `/data/${city}/ocean_depth_index.json`).catch(() => null);
+    const airport = await loadCityJson<AirportFeatureCollection>(host, `/data/${city}/runways_taxiways.geojson`).catch(() => null);
+    if (!water && !airport) {
+      console.warn(`${TAG} no water/airport masks for ${city} — placing without a mask`);
       return null;
     }
-  }
-
-  /** Airport index (apron/runway polygons) — one load attempt per city; null = no mask. */
-  async function loadAirportIndex(city: string): Promise<AirportIndex | null> {
-    try {
-      const file = await loadCityJson<AirportFeatureCollection>(
-        window as unknown as DataServerHost, `/data/${city}/runways_taxiways.geojson`,
-      );
-      return buildAirportIndex(file);
-    } catch (e) {
-      console.warn(`${TAG} no runways_taxiways for ${city} — placing without an airport mask`, e);
-      return null;
-    }
+    const raster = buildBlockedRasterFromFiles(water, airport, DEFAULT_CONFIG.WATER_RASTER_CELL_M);
+    const ms = performance.now() - start;
+    if (DEBUG) console.log(`[InducedDemand][perf] blocked raster ${ms.toFixed(0)}ms (water ${water?.depths.length ?? 0} polys, coverage ${((raster?.coverage ?? 0) * 100).toFixed(0)}%)`);
+    if (ms > PERF_BUDGETS.water) console.warn(`${TAG} blocked raster over budget: ${ms.toFixed(0)}ms`);
+    return raster;
   }
   const LEDGER_KEY = (city: string): string => `induceddemand:ledger:${city}`;
   // Fitted road speeds: derived from the city's data, so they only change when the
@@ -392,16 +382,10 @@ if (!api) {
   }
 
   /** Lattice dependency bundle — shared by the rebuild integration pass and day-loop findCut. */
-  function latticeDeps(
-    accessIdx: AccessIndex,
-    fit: DensityFit,
-    water: WaterIndex | null,
-    airport: AirportIndex | null,
-  ): LatticeDeps {
+  function latticeDeps(accessIdx: AccessIndex, fit: DensityFit, blocked: BlockedRaster | null): LatticeDeps {
     return {
       accessAt: (c) => accessIdx.at(c),
-      isWater: (c) => water?.isWater(c) ?? false,
-      isAirport: (c) => airport?.isAirport(c) ?? false,
+      blockedWithin: (c, r) => blocked?.blockedWithin(c, r) ?? false,
       supportedDensity: (a) => supportedDensityAt(fit, a),
       spacingAt: (a) => spacingAt(fit, a),
       minAccess: DEFAULT_CONFIG.MIN_SITE_ACCESS,
@@ -414,8 +398,7 @@ if (!api) {
     stations: Station[],
     accessIdx: AccessIndex,
     fit: DensityFit,
-    water: WaterIndex | null,
-    airport: AirportIndex | null,
+    blocked: BlockedRaster | null,
   ): Map<string, CellIntegral> {
     return integrateCells({
       anchors: [...dd.points.values()].map((p) => ({ id: p.id, location: p.location })),
@@ -424,7 +407,7 @@ if (!api) {
         .map((s) => s.coords),
       catchmentM: DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED,
       latticeM: DEFAULT_CONFIG.LATTICE_M,
-      deps: latticeDeps(accessIdx, fit, water, airport),
+      deps: latticeDeps(accessIdx, fit, blocked),
     });
   }
 
@@ -446,17 +429,11 @@ if (!api) {
     if (!dd) return;
     const gen = ++fieldBuildGen;
     const session = ensureSession();
-    let water = session.field?.city === city ? session.field.water : null;
-    let waterFailed = session.field?.city === city ? session.field.waterFailed : false;
-    if (!water && !waterFailed) {
-      water = await loadWaterIndex(city);
-      waterFailed = water === null;
-    }
-    let airport = session.field?.city === city ? session.field.airport : null;
-    let airportFailed = session.field?.city === city ? session.field.airportFailed : false;
-    if (!airport && !airportFailed) {
-      airport = await loadAirportIndex(city);
-      airportFailed = airport === null;
+    let blocked = session.field?.city === city ? session.field.blocked : null;
+    let blockedFailed = session.field?.city === city ? session.field.blockedFailed : false;
+    if (!blocked && !blockedFailed) {
+      blocked = await loadBlockedRaster(city);
+      blockedFailed = blocked === null;
     }
     const stale = (): boolean => gen !== fieldBuildGen || !isCurrent() || key() !== city;
     if (stale()) return;
@@ -481,7 +458,7 @@ if (!api) {
     // double-count overlapping catchment edges). ~50-100ms in one chunk: same
     // budget class as the old sampling phase, amortized by the other yields;
     // split into finer slices only if the perf line complains.
-    const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, water, airport);
+    const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, blocked);
     await yieldToLoop();
     if (stale()) return;
 
@@ -489,7 +466,7 @@ if (!api) {
       city, sites, cells,
       graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,
       fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
-      water, waterFailed, airport, airportFailed,
+      blocked, blockedFailed,
       jobDensity: buildJobDensity(dd.points.values(), DEFAULT_CONFIG),
       popDensity: buildPopDensity(dd.points.values(), DEFAULT_CONFIG.POP_DENSITY_RADIUS_M),
     };
@@ -505,21 +482,19 @@ if (!api) {
    * fire the chunked path).
    */
   function rebuildFieldSync(
-    dd: DemandData, city: string,
-    water: WaterIndex | null, waterFailed: boolean,
-    airport: AirportIndex | null, airportFailed: boolean,
+    dd: DemandData, city: string, blocked: BlockedRaster | null, blockedFailed: boolean,
   ): void {
     fieldBuildGen++; // cancel any in-flight chunked build; this snapshot is newer
     perf.track('tier1', PERF_BUDGETS.tier1, () => {
       const weights = computeWeights(dd);
       const fit = computeFit(dd, weights.accessIdx);
       const sites = buildPointSites(dd, (c) => weights.accessIdx.at(c));
-      const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, water, airport);
+      const cells = computeCells(dd, weights.stations, weights.accessIdx, fit, blocked);
       ensureSession().field = {
         city, sites, cells,
         graph: weights.graph, opps: weights.opps, accessIdx: weights.accessIdx,
         fit, hash: weights.hash, serviceHash: weights.serviceHash, massDrift: 0,
-        water, waterFailed, airport, airportFailed,
+        blocked, blockedFailed,
         jobDensity: buildJobDensity(dd.points.values(), DEFAULT_CONFIG),
         popDensity: buildPopDensity(dd.points.values(), DEFAULT_CONFIG.POP_DENSITY_RADIUS_M),
       };
@@ -548,7 +523,7 @@ if (!api) {
     }
     const routes = liveRoutes();
     if (computeStructuralHash(routes) !== f.hash) {
-      rebuildFieldSync(dd, city, f.water, f.waterFailed, f.airport, f.airportFailed);
+      rebuildFieldSync(dd, city, f.blocked, f.blockedFailed);
       return;
     }
     let totalMass = 0;
@@ -1425,7 +1400,7 @@ if (!api) {
     let result: DayResult = { added: 0, removed: 0, newPoints: 0, readyCells: 0, nullCuts: 0, deltas: {} };
     // Diagnostic: why ready cells fail to place a cut this day (per-gate tally
     // over the FAILED cells only), surfaced in the heartbeat below.
-    const cutReject: CutRejects = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0, clearance: 0 };
+    const cutReject: CutRejects = { samples: 0, floor: 0, blocked: 0, outCell: 0, spacing: 0, clearance: 0 };
     if (field && field.city === key()) {
       try {
         result = perf.track('day', PERF_BUDGETS.day, () => runDay(
@@ -1440,18 +1415,18 @@ if (!api) {
             // Cut validity re-checks against the CURRENT points (splits earlier
             // in the same loop may have added anchors since the lattice pass).
             findCut: (anchorId, centroid) => {
-              const rej: CutRejects = { samples: 0, floor: 0, water: 0, airport: 0, outCell: 0, spacing: 0, clearance: 0 };
+              const rej: CutRejects = { samples: 0, floor: 0, blocked: 0, outCell: 0, spacing: 0, clearance: 0 };
               const cut = findCut({
                 anchorId,
                 centroid,
                 anchors: [...dd.points.values()].map((p) => ({ id: p.id, location: p.location })),
                 latticeM: DEFAULT_CONFIG.FINDCUT_LATTICE_M,
                 clearanceM: DEFAULT_CONFIG.WATER_CLEARANCE_M,
-                deps: latticeDeps(field.accessIdx, field.fit, field.water, field.airport),
+                deps: latticeDeps(field.accessIdx, field.fit, field.blocked),
               }, rej);
               if (!cut) { // tally reasons only for cells that couldn't place
                 cutReject.samples += rej.samples; cutReject.floor += rej.floor;
-                cutReject.water += rej.water; cutReject.airport += rej.airport;
+                cutReject.blocked += rej.blocked;
                 cutReject.outCell += rej.outCell; cutReject.spacing += rej.spacing;
                 cutReject.clearance += rej.clearance;
               }
@@ -1489,7 +1464,7 @@ if (!api) {
       }
       const cr = cutReject;
       const rejStr = result.nullCuts > 0
-        ? ` [reject: floor ${cr.floor} water ${cr.water} airport ${cr.airport} clearance ${cr.clearance} outCell ${cr.outCell} spacing ${cr.spacing} /${cr.samples} samples]`
+        ? ` [reject: floor ${cr.floor} blocked ${cr.blocked} clearance ${cr.clearance} outCell ${cr.outCell} spacing ${cr.spacing} /${cr.samples} samples]`
         : '';
       console.log(
         `${TAG} day ${day}: ${dd.points.size} pts, ${stations.length} stations, ${active} active, ` +

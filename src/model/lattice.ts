@@ -18,9 +18,14 @@ const M_PER_DEG_LAT = 111194.9;
 
 export interface LatticeDeps {
   accessAt(c: Coordinate): DirectionalAccess;
-  isWater(c: Coordinate): boolean;
-  /** Forbid materializing a point here (on an airport apron/runway). */
-  isAirport(c: Coordinate): boolean;
+  /**
+   * Water/airport (or any placement obstacle) within `radiusM` of `c`, tested
+   * against the fine blocked raster (a disc scan; `radiusM` 0 = the cell at `c`).
+   * Replaces the old point-in-polygon isWater/isAirport — a fine precomputed
+   * raster resolves thin rivers and shoreline neighbourhoods that discrete point
+   * sampling misses.
+   */
+  blockedWithin(c: Coordinate, radiusM: number): boolean;
   /** People per m² the access level supports (densityFit.supportedDensityAt). */
   supportedDensity(access: number): number;
   /** Min distance (m) a cut must keep from every existing point. */
@@ -220,11 +225,10 @@ export interface FindCutOpts {
 export interface CutRejects {
   samples: number;  // candidate lattice samples visited
   floor: number;    // rejected: access < minAccess
-  water: number;    // rejected: on water
-  airport: number;  // rejected: on an airport (apron/runway)
+  blocked: number;  // rejected: the candidate's own cell is water/airport
   outCell: number;  // rejected: nearest anchor isn't this cell (search disc off the cell)
   spacing: number;  // rejected: within spacingAt of an existing point (no room)
-  clearance: number; // rejected: water/airport within the clearance margin
+  clearance: number; // rejected: water/airport within the clearance margin (disc)
 }
 
 /**
@@ -252,25 +256,7 @@ export function findCut(opts: FindCutOpts, reject?: CutRejects): Coordinate | nu
     2 * haversine(anchor.location, opts.centroid),
     4 * opts.latticeM,
   );
-  // A candidate is too close to water/airport if any point on a ring at
-  // `clearanceM` is blocked — a cheap buffer so points don't hug shorelines or
-  // runway edges. 8 compass points (diagonals scaled by √½) — finer detection
-  // than the single point-in-polygon test at the candidate itself.
   const clearanceM = opts.clearanceM ?? 0;
-  const nearBlocked = (lon: number, lat: number): boolean => {
-    const dLat = clearanceM / M_PER_DEG_LAT;
-    const dLon = clearanceM / (M_PER_DEG_LAT * Math.max(0.05, Math.cos((lat * Math.PI) / 180)));
-    const d = Math.SQRT1_2; // diagonal component so all 8 offsets sit at radius clearanceM
-    const offs: [number, number][] = [
-      [dLon, 0], [-dLon, 0], [0, dLat], [0, -dLat],
-      [dLon * d, dLat * d], [-dLon * d, dLat * d], [dLon * d, -dLat * d], [-dLon * d, -dLat * d],
-    ];
-    for (const [ox, oy] of offs) {
-      const c: Coordinate = [lon + ox, lat + oy];
-      if (deps.isWater(c) || deps.isAirport(c)) return true;
-    }
-    return false;
-  };
   let best: Coordinate | null = null;
   let bestD = Infinity;
   enumerateSamples([opts.centroid], searchR, opts.latticeM, (sample) => {
@@ -278,16 +264,15 @@ export function findCut(opts: FindCutOpts, reject?: CutRejects): Coordinate | nu
     const a = deps.accessAt(sample);
     const access = Math.max(a.res, a.com);
     if (access < deps.minAccess) { if (reject) reject.floor++; return; }
-    if (deps.isWater(sample)) { if (reject) reject.water++; return; }
-    if (deps.isAirport(sample)) { if (reject) reject.airport++; return; }
+    if (deps.blockedWithin(sample, 0)) { if (reject) reject.blocked++; return; } // on water/airport
     if (index.nearest(sample)?.id !== opts.anchorId) { if (reject) reject.outCell++; return; } // outside the cell
     const minDist = deps.spacingAt(access);
     for (const other of index.within(sample, minDist)) {
       if (haversine(sample, other.location) < minDist) { if (reject) reject.spacing++; return; }
     }
-    // Clearance last — the ring test is the most work, so only otherwise-valid
-    // candidates pay for it.
-    if (clearanceM > 0 && nearBlocked(sample[0], sample[1])) { if (reject) reject.clearance++; return; }
+    // Clearance last (the disc scan is the most work, so only otherwise-valid
+    // candidates pay for it): reject a point with water/airport within the margin.
+    if (clearanceM > 0 && deps.blockedWithin(sample, clearanceM)) { if (reject) reject.clearance++; return; }
     const d = haversine(sample, opts.centroid);
     if (d < bestD) { bestD = d; best = sample; }
   });

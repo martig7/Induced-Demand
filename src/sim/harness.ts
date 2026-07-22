@@ -21,8 +21,7 @@ import { buildPointSites, type Site } from '../model/field';
 import { integrateCells, findCut, type CellIntegral, type LatticeDeps } from '../model/lattice';
 import { buildJobDensity } from '../model/agglomeration';
 import { buildPopDensity } from '../model/localDensity';
-import type { WaterIndex } from '../game/waterIndex';
-import type { AirportIndex } from '../game/airportIndex';
+import { buildBlockedRasterFromFiles, type BlockedRaster } from '../game/blockedRaster';
 import { runDay, type RunDayDeps } from '../model/engine';
 import { newLedger, captureBaselines } from '../model/ledger';
 import { makeRng } from '../model/gravity';
@@ -43,13 +42,11 @@ function nativeTotals(stations: Station[], dd: DemandData, cfg: InducedDemandCon
 }
 
 function latticeDeps(
-  accessIdx: AccessIndex, fit: DensityFit, cfg: InducedDemandConfig,
-  water: WaterIndex | null, airport: AirportIndex | null,
+  accessIdx: AccessIndex, fit: DensityFit, cfg: InducedDemandConfig, blocked: BlockedRaster | null,
 ): LatticeDeps {
   return {
     accessAt: (c) => accessIdx.at(c),
-    isWater: (c) => water?.isWater(c) ?? false,
-    isAirport: (c) => airport?.isAirport(c) ?? false,
+    blockedWithin: (c, r) => blocked?.blockedWithin(c, r) ?? false,
     supportedDensity: (a) => supportedDensityAt(fit, a),
     spacingAt: (a) => spacingAt(fit, a),
     minAccess: cfg.MIN_SITE_ACCESS,
@@ -60,7 +57,7 @@ function latticeDeps(
 function buildField(
   dd: DemandData, stations: Station[], routes: Route[], groups: StationGroup[],
   frozen: { res: number; jobs: number }, cfg: InducedDemandConfig,
-  water: WaterIndex | null, airport: AirportIndex | null,
+  blocked: BlockedRaster | null,
 ): { sites: Site[]; deps: RunDayDeps } {
   const graph = buildStationGraph(routes, stations, groups, cfg);
   const opps = computeOpportunities(graph, stationMasses(stations, dd.points.values(), cfg), cfg, frozen);
@@ -76,7 +73,7 @@ function buildField(
     [...dd.points.values()].map((p) => ({ id: p.id, location: p.location }));
   const cells = integrateCells({
     anchors: anchorsOf(), stations: routedCoords, catchmentM,
-    latticeM: cfg.LATTICE_M, deps: latticeDeps(accessIdx, fit, cfg, water, airport),
+    latticeM: cfg.LATTICE_M, deps: latticeDeps(accessIdx, fit, cfg, blocked),
   });
   const jobDensity = buildJobDensity(dd.points.values(), cfg);
   const popDensity = buildPopDensity(dd.points.values(), cfg.POP_DENSITY_RADIUS_M);
@@ -89,7 +86,7 @@ function buildField(
     findCut: (anchorId, centroid) => findCut({
       anchorId, centroid, anchors: anchorsOf(),
       latticeM: cfg.FINDCUT_LATTICE_M, clearanceM: cfg.WATER_CLEARANCE_M,
-      deps: latticeDeps(accessIdx, fit, cfg, water, airport),
+      deps: latticeDeps(accessIdx, fit, cfg, blocked),
     }),
   };
   return { sites, deps };
@@ -138,14 +135,15 @@ export function runSimulation(
   parsed: ParsedDump, days: number, cfg: InducedDemandConfig = DEFAULT_CONFIG,
   onDay?: (day: number, added: number, removed: number, newPoints: number) => void,
 ): SimResult {
-  const { dd, routes, groups, city, water, airport } = parsed;
+  const { dd, routes, groups, city } = parsed;
+  const blocked = buildBlockedRasterFromFiles(parsed.waterFile, parsed.airportFile, cfg.WATER_RASTER_CELL_M);
   const active = inductionStations(parsed.stations);
   const ledger = newLedger();
   captureBaselines(dd, ledger);
   const frozen = nativeTotals(active, dd, cfg); // baseline totals, frozen for Ô normalization
   const before = snapshot(dd, 0);
   for (let day = 0; day < days; day++) {
-    const field = buildField(dd, active, routes, groups, frozen, cfg, water, airport);
+    const field = buildField(dd, active, routes, groups, frozen, cfg, blocked);
     const r = runDay(dd, field.sites, ledger, cfg, makeRng((day + 1) * 0x9e3779b1 >>> 0),
       field.deps, DEFAULT_SLOT_SET, DEFAULT_DRIVING_MODEL);
     onDay?.(day, r.added, r.removed, r.newPoints);

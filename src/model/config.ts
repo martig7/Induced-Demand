@@ -126,11 +126,19 @@ export interface InducedDemandConfig {
   FINDCUT_LATTICE_M: number;
   /**
    * Min clearance (m) a new point keeps from water/airport: findCut rejects a
-   * candidate with water/airport within this radius (ring test), so points don't
-   * sit right at a shoreline or runway edge. 0 = reject only points exactly on
-   * water/airport (legacy).
+   * candidate with any water/airport within this radius, tested against the fine
+   * blocked raster (a disc scan — no thin-feature straddle), so points don't sit
+   * right at a shoreline or runway edge. 0 = reject only cells exactly on
+   * water/airport.
    */
   WATER_CLEARANCE_M: number;
+  /**
+   * Cell size (m) of the blocked raster: water + airport polygons are scan-filled
+   * once per city into a bit-per-cell mask at this resolution, which findCut then
+   * queries by disc. Finer = sharper shoreline/thin-river detection, more memory
+   * and a slower one-time build. 25 m ≈ 0.8 MB over a 70 km city.
+   */
+  WATER_RASTER_CELL_M: number;
   /**
    * Split-pressure threshold (in days). A cell accrues `excess × fill` per day,
    * where excess = supportedMass/capTotal − 1 (extra anchor-loads it supports).
@@ -213,6 +221,7 @@ export const DEFAULT_CONFIG: InducedDemandConfig = {
   LATTICE_M: 250,
   FINDCUT_LATTICE_M: 100, // finer placement grid: dodge shorelines/runways at higher res
   WATER_CLEARANCE_M: 100, // keep new points ≥100 m off water/airport edges
+  WATER_RASTER_CELL_M: 25, // blocked-raster resolution for the water/airport disc test
   TARGET_SPLIT_DAYS: 10,
   SPLIT_PRESSURE_DECAY: 1.0, // net accrual excess·fill − 1: needs room for ~a full extra point
   TARGET_POP_DENSITY_PER_KM2: 3000, // split headroom target (res+jobs/km²): dense cities gate, sparse subdivide

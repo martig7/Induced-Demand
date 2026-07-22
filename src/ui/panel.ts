@@ -124,7 +124,6 @@ export function createPanel(
         seg('Off', (s.heatView ?? 'off') === 'off', () => store.set({ heatView: 'off' })),
         seg('Res', s.heatView === 'accessRes', () => store.set({ heatView: 'accessRes' })),
         seg('Com', s.heatView === 'accessCom', () => store.set({ heatView: 'accessCom' })),
-        seg('Pres', s.heatView === 'pressure', () => store.set({ heatView: 'pressure' })),
         seg('Cells', s.heatView === 'cells', () => store.set({ heatView: 'cells' })),
       ]),
       legend,

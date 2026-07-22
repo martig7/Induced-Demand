@@ -1,94 +1,21 @@
 /**
- * Field heat view (spec §7): the targeting display IS the model's input. Views:
- * residential access, commercial access, growth pressure.
- *
- * Rendered as a single BAKED RASTER, not stacked marks. Every site is splatted
- * as a soft Gaussian and combined by MAX across sites (a union of kernels, never
- * a sum), so the field is one smooth surface with the color gradient baked into
- * its pixels. Because it is one georeferenced image:
- *  - it scales with the map (fixed ground footprint at every zoom), and
- *  - overlapping sites can never alpha-stack into a saturated blob — the reason
- *    the translucent-circle version turned solid red when zoomed out.
- * Color still encodes each site's ABSOLUTE value (access already in [0,1];
- * pressure = accum/POP_SIZE clamped), so a color always means the same value.
+ * Field heat views (spec §7): residential access, commercial access, and the
+ * Voronoi split-pressure cells. Each is baked as a single georeferenced RASTER
+ * (not stacked marks), so it scales with the map (fixed ground footprint at
+ * every zoom) and overlapping values never alpha-stack into a saturated blob.
+ * Color encodes an absolute [0,1] value, so a color always means the same thing.
  */
 import type { ModdingAPI } from '../types/api';
-import type { InducedDemandConfig } from '../model/config';
-import type { LedgerState } from '../model/ledger';
-import type { Site } from '../model/field';
 import { clamp01 } from '../model/util';
 import { RAMP_LOW, RAMP_MID, RAMP_HIGH } from './overlay';
 
 export const HEAT_SOURCE_ID = 'induced-demand-heat-source';
 export const HEAT_LAYER_ID = 'induced-demand-heatmap';
 
-export type HeatView = 'off' | 'accessRes' | 'accessCom' | 'pressure' | 'cells';
-
-export interface HeatFeature {
-  type: 'Feature';
-  geometry: { type: 'Point'; coordinates: [number, number] };
-  /** `t` = the site's ABSOLUTE value in [0,1]; drives the baked color. */
-  properties: { id: string; t: number };
-}
-export interface HeatFeatureCollection {
-  type: 'FeatureCollection';
-  features: HeatFeature[];
-  /** Citywide max of the raw view value (for a legend); 0 when the field is empty. */
-  maxValue: number;
-}
+export type HeatView = 'off' | 'accessRes' | 'accessCom' | 'cells';
 
 /** Below this baked value a pixel is transparent (keeps the field's edge soft-but-bounded). */
 const MIN_VALUE = 0.03;
-
-/**
- * Absolute [0,1] value for a view. Access scores are already in [0,1]. Pressure
- * is the accumulator relative to one POP_SIZE of readiness (a site spawns a pop
- * near accum == POP_SIZE), clamped so a fully-pressured site is the ramp's top.
- */
-function absoluteValue(s: Site, ledger: LedgerState, view: Exclude<HeatView, 'off'>, cfg: InducedDemandConfig): number {
-  if (view === 'accessRes') return clamp01(s.accessRes);
-  if (view === 'accessCom') return clamp01(s.accessCom);
-  const e = ledger.points[s.pointId];
-  return clamp01(Math.max(e?.resAccum ?? 0, e?.jobAccum ?? 0, 0) / cfg.POP_SIZE);
-}
-
-/** A cell's prospective cut for the pressure view: where the next point would appear. */
-export interface ProspectiveCut { location: [number, number]; t: number }
-
-export function buildHeatFeatures(
-  sites: Site[],
-  ledger: LedgerState,
-  view: Exclude<HeatView, 'off'>,
-  cfg: InducedDemandConfig,
-  /** Pressure view only: split pressure rendered at each cell's prospective cut. */
-  cuts: ProspectiveCut[] = [],
-): HeatFeatureCollection {
-  const features: HeatFeature[] = [];
-  let maxValue = 0;
-  for (const s of sites) {
-    const t = absoluteValue(s, ledger, view, cfg);
-    if (t > maxValue) maxValue = t;
-    if (t < MIN_VALUE) continue;
-    features.push({
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [s.location[0], s.location[1]] },
-      properties: { id: s.id, t },
-    });
-  }
-  if (view === 'pressure') {
-    cuts.forEach((c, i) => {
-      const t = clamp01(c.t);
-      if (t < MIN_VALUE) return;
-      features.push({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: c.location },
-        properties: { id: `cut:${i}`, t },
-      });
-      if (t > maxValue) maxValue = t;
-    });
-  }
-  return { type: 'FeatureCollection', features, maxValue };
-}
 
 // --- Rasterization (pure) ----------------------------------------------------
 
@@ -122,19 +49,7 @@ export function rampColor(t: number): [number, number, number] {
   return RAMP[RAMP.length - 1][1];
 }
 
-/**
- * Baked-raster resolution: the longest grid dimension in pixels. Higher = finer
- * detail and less blockiness when zoomed in, at a roughly quadratic bake cost.
- */
-const GRID_MAX = 1024;
-/**
- * Gaussian reach (m). Kernels must overlap enough to stay continuous over the
- * ~150–600 m site spacing, but a tight kernel keeps dense high-value clusters as
- * distinct bright cores instead of smearing them into one flat hot blob.
- */
-const KERNEL_METERS = 400;
-
-/** Continuous access views sample cheaply per pixel — fewer pixels than the splat. */
+/** Continuous access/cells views sample cheaply per pixel over the catchment grid. */
 const ACCESS_GRID_MAX = 512;
 /** Ramp alpha from 0→full over [MIN_VALUE, MIN_VALUE + ALPHA_FADE]. */
 const ALPHA_FADE = 0.12;
@@ -158,13 +73,6 @@ export function contrastStretch(raw: number, maxV: number, gamma = ACCESS_CONTRA
   return clamp01(clamp01(raw) / maxV) ** gamma;
 }
 
-export interface RasterOptions {
-  /** Longest grid dimension in pixels (the shorter side keeps aspect). */
-  gridMax?: number;
-  /** Gaussian reach (m): kernels merge into a continuous field at this scale. */
-  kernelMeters?: number;
-}
-
 export interface FieldRaster {
   data: Uint8ClampedArray;
   width: number;
@@ -180,75 +88,9 @@ const EMPTY_RASTER: FieldRaster = {
 };
 
 /**
- * Bake `features` into an RGBA field: each site contributes a Gaussian of its
- * value `t`; cells take the MAX contribution (union of kernels), then map to the
- * ramp with a soft alpha fade near the low end. Empty input → a 1×1 transparent
- * pixel with a degenerate bbox (the caller hides the layer anyway).
- */
-export function rasterizeField(features: HeatFeature[], opts: RasterOptions = {}): FieldRaster {
-  const gridMax = opts.gridMax ?? GRID_MAX;
-  const kernelMeters = opts.kernelMeters ?? KERNEL_METERS;
-  if (features.length === 0) return EMPTY_RASTER;
-  let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
-  for (const f of features) {
-    const [lon, lat] = f.geometry.coordinates;
-    if (lon < w) w = lon; if (lon > e) e = lon;
-    if (lat < s) s = lat; if (lat > n) n = lat;
-  }
-  const midLat = (s + n) / 2;
-  const mPerLon = M_PER_DEG_LAT * Math.max(0.05, Math.cos((midLat * Math.PI) / 180));
-  const padLat = kernelMeters / M_PER_DEG_LAT;
-  const padLon = kernelMeters / mPerLon;
-  w -= padLon; e += padLon; s -= padLat; n += padLat;
-
-  const spanLon = e - w, spanLat = n - s;
-  const spanXm = spanLon * mPerLon, spanYm = spanLat * M_PER_DEG_LAT;
-  const aspect = spanXm / spanYm;
-  const width = aspect >= 1 ? gridMax : Math.max(1, Math.round(gridMax * aspect));
-  const height = aspect >= 1 ? Math.max(1, Math.round(gridMax / aspect)) : gridMax;
-
-  const sigmaX = ((kernelMeters / 2) / spanXm) * width;
-  const sigmaY = ((kernelMeters / 2) / spanYm) * height;
-  const krX = Math.max(1, Math.ceil(3 * sigmaX));
-  const krY = Math.max(1, Math.ceil(3 * sigmaY));
-
-  const grid = new Float32Array(width * height); // max value per cell
-  for (const f of features) {
-    const [lon, lat] = f.geometry.coordinates;
-    const t = f.properties.t;
-    const cx = ((lon - w) / spanLon) * width;
-    const cy = ((n - lat) / spanLat) * height; // pixel y grows downward
-    const x0 = Math.max(0, Math.floor(cx - krX)), x1 = Math.min(width - 1, Math.ceil(cx + krX));
-    const y0 = Math.max(0, Math.floor(cy - krY)), y1 = Math.min(height - 1, Math.ceil(cy + krY));
-    for (let y = y0; y <= y1; y++) {
-      const dy = (y + 0.5 - cy) / sigmaY;
-      for (let x = x0; x <= x1; x++) {
-        const dx = (x + 0.5 - cx) / sigmaX;
-        const v = t * Math.exp(-0.5 * (dx * dx + dy * dy));
-        const idx = y * width + x;
-        if (v > grid[idx]) grid[idx] = v;
-      }
-    }
-  }
-
-  const data = new Uint8ClampedArray(width * height * 4);
-  let any = false;
-  for (let i = 0; i < grid.length; i++) {
-    const v = grid[i];
-    if (v < MIN_VALUE) continue; // leave transparent
-    any = true;
-    const [r, g, b] = rampColor(v);
-    const o = i * 4;
-    data[o] = r; data[o + 1] = g; data[o + 2] = b;
-    data[o + 3] = Math.round(255 * clamp01((v - MIN_VALUE) / ALPHA_FADE));
-  }
-  return { data, width, height, bbox: [w, s, e, n], empty: !any };
-}
-
-/**
  * Bake a CONTINUOUS scalar field by evaluating `valueAt` per pixel over `bbox`,
- * for the access views (spec 2026-07-18 follow-up): unlike rasterizeField, this
- * shows access EVERYWHERE it exists — including empty land near a new station,
+ * for the access views (spec 2026-07-18 follow-up): this shows access EVERYWHERE
+ * it exists — including empty land near a new station,
  * which has no demand point to splat. `valueAt` returns access in [0,1]; the
  * ramp + alpha fade match the splat path. Pixels far from stations return ~0 and
  * cost almost nothing (the access index short-circuits empty grid cells).

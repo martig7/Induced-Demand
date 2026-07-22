@@ -15,7 +15,7 @@ export interface OverlayState {
   /** Inline history section expanded in the toolbar panel. */
   historyOpen?: boolean;
   /** Field heatmap view; 'off' hides the layer. */
-  heatView?: 'off' | 'accessRes' | 'accessCom' | 'pressure' | 'cells';
+  heatView?: 'off' | 'accessRes' | 'accessCom' | 'cells';
 }
 
 export interface OverlayStore {

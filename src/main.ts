@@ -65,8 +65,8 @@ import { buildPopDensity, type PopDensity } from './model/localDensity';
 import { recreateMaterializedPoints } from './model/ledger';
 import { createPerfTracker, PERF_BUDGETS } from './model/perf';
 import {
-  registerHeatmap, updateHeatmap, setHeatmapVisible, buildHeatFeatures,
-  rasterizeField, rasterizeAccessField, rasterizeAccessFieldChunked,
+  registerHeatmap, updateHeatmap, setHeatmapVisible,
+  rasterizeAccessField, rasterizeAccessFieldChunked,
   type HeatView, type FieldRaster,
 } from './overlay/heatmap';
 
@@ -693,19 +693,6 @@ if (!api) {
           raster = cellsCache?.raster ?? null;
           staleCells = true; // don't finalize heatKey — refresh again when the bake completes
         }
-      } else {
-        // Pressure view: pop pressure at points + split pressure at each cell's
-        // prospective cut location. APPROXIMATION: the cut marker uses the raw
-        // access-weighted centroid, not findCut's validated sample (findCut per
-        // cell per refresh would be costly) — it can sit slightly off, or over
-        // water when validity pushes the real cut elsewhere.
-        const cuts = !f.cells ? [] : [...f.cells.entries()]
-          .filter(([id, cell]) => cell.centroid !== null && (ledger.cells?.[id] ?? 0) > 0)
-          .map(([id, cell]) => ({
-            location: [cell.centroid![0], cell.centroid![1]] as [number, number],
-            t: (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS,
-          }));
-        raster = rasterizeField(buildHeatFeatures(f.sites, ledger, view, DEFAULT_CONFIG, cuts).features);
       }
       if (raster) {
         updateHeatmap(api, raster);

@@ -584,6 +584,10 @@ if (!api) {
   let heatPending = false;
   let lastHeatKey = '';
   let lastHeatEmpty = false;
+  // Cells-view raster cache, keyed by heatRev (invalidated on every rebuild/growth
+  // day). Pre-warmed after each day when the overlay is enabled, so SWITCHING to
+  // the cells view shows the cached image instantly instead of baking on open.
+  let cellsCache: { rev: number; raster: FieldRaster } | null = null;
   const rafSchedule = (fn: () => void): void => {
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn);
     else setTimeout(fn, 16);
@@ -597,6 +601,65 @@ if (!api) {
       if (isCurrent()) doHeatmapRefresh();
     });
   }
+  /**
+   * Bake the cells-view raster (nearest-anchor Voronoi cells colored by split
+   * pressure, hatched where uncuttable). Costly — a per-pixel nearest-anchor
+   * lookup over the catchment grid — so its result is cached by heatRev.
+   */
+  function bakeCellsRaster(f: NonNullable<NonNullable<typeof wSession[typeof SESSION_KEY]>['field']>): FieldRaster {
+    const ddNow = api.gameState.getDemandData();
+    const anchorIndex = createAnchorIndex(
+      [...(ddNow?.points.values() ?? [])].map((p) => ({ id: p.id, location: p.location })),
+    );
+    const bbox = catchmentBBox(f.opps, DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED);
+    // Memoize the nearest-anchor lookup so value + hatch predicate (called
+    // back-to-back per pixel) don't each pay for it.
+    let cacheLon = NaN, cacheLat = NaN, cacheId: string | null = null;
+    const anchorAt = (lon: number, lat: number): string | null => {
+      if (lon !== cacheLon || lat !== cacheLat) {
+        cacheLon = lon; cacheLat = lat; cacheId = anchorIndex.nearest([lon, lat])?.id ?? null;
+      }
+      return cacheId;
+    };
+    return rasterizeAccessField(bbox, (lon, lat) => {
+      const id = anchorAt(lon, lat);
+      return id ? (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS : 0;
+    }, {
+      // Hatch (dashed) a cell that's at max pressure but survived the day's split
+      // pass — i.e. ready yet uncuttable (saturated density). Cuttable ready cells
+      // split away and drop to 0, so at-cap == uncuttable.
+      hatchAt: (lon, lat) => {
+        const id = anchorAt(lon, lat);
+        return !!id && (ledger.cells?.[id] ?? 0) >= DEFAULT_CONFIG.TARGET_SPLIT_DAYS;
+      },
+    });
+  }
+
+  /** Cached cells raster for the current heatRev, baking + storing on a miss. */
+  function cellsRaster(f: NonNullable<NonNullable<typeof wSession[typeof SESSION_KEY]>['field']>): FieldRaster {
+    if (cellsCache?.rev === heatRev) return cellsCache.raster;
+    const raster = bakeCellsRaster(f);
+    cellsCache = { rev: heatRev, raster };
+    return raster;
+  }
+
+  /**
+   * Pre-bake the cells raster for the current day into the cache, so a later
+   * switch to the cells view is instant. Runs on a deferred frame (after the
+   * active view renders) and only while the overlay is enabled — so it costs one
+   * extra bake per day ONLY when the overlay is open on a non-cells view; nothing
+   * when the overlay is off or cells is already the active (already-baked) view.
+   */
+  function prewarmCells(): void {
+    if (!overlayStore.get().enabled) return;
+    if (cellsCache?.rev === heatRev) return;
+    rafSchedule(() => {
+      if (!isCurrent() || !overlayStore.get().enabled || cellsCache?.rev === heatRev) return;
+      const f = wSession[SESSION_KEY]?.field;
+      if (f && f.city === key()) cellsCache = { rev: heatRev, raster: bakeCellsRaster(f) };
+    });
+  }
+
   function doHeatmapRefresh(): void {
     const s = overlayStore.get();
     const view = (s.heatView ?? 'off') as HeatView;
@@ -623,35 +686,9 @@ if (!api) {
         }, { contrast: true }); // normalize + gamma-lift so a low-max field still reads
       } else if (view === 'cells') {
         // Cells view: each Voronoi cell (nearest-anchor region) colored by its
-        // split pressure / threshold (hot = about to spawn a point). Zero-pressure
-        // cells stay transparent, so only the cells actively building toward a
-        // split show; the colored region's edge is the cell boundary.
-        const ddNow = api.gameState.getDemandData();
-        const anchorIndex = createAnchorIndex(
-          [...(ddNow?.points.values() ?? [])].map((p) => ({ id: p.id, location: p.location })),
-        );
-        const bbox = catchmentBBox(f.opps, DEFAULT_CONFIG.CATCHMENT_SECONDS * DEFAULT_CONFIG.WALK_SPEED);
-        // Memoize the nearest-anchor lookup so value + hatch predicate (called
-        // back-to-back per pixel) don't each pay for it.
-        let cacheLon = NaN, cacheLat = NaN, cacheId: string | null = null;
-        const anchorAt = (lon: number, lat: number): string | null => {
-          if (lon !== cacheLon || lat !== cacheLat) {
-            cacheLon = lon; cacheLat = lat; cacheId = anchorIndex.nearest([lon, lat])?.id ?? null;
-          }
-          return cacheId;
-        };
-        raster = rasterizeAccessField(bbox, (lon, lat) => {
-          const id = anchorAt(lon, lat);
-          return id ? (ledger.cells?.[id] ?? 0) / DEFAULT_CONFIG.TARGET_SPLIT_DAYS : 0;
-        }, {
-          // Hatch (dashed) a cell that's at max pressure but survived the day's
-          // split pass — i.e. ready yet uncuttable (saturated density). Cuttable
-          // ready cells split away and drop to 0, so at-cap == uncuttable.
-          hatchAt: (lon, lat) => {
-            const id = anchorAt(lon, lat);
-            return !!id && (ledger.cells?.[id] ?? 0) >= DEFAULT_CONFIG.TARGET_SPLIT_DAYS;
-          },
-        });
+        // split pressure / threshold (hot = about to spawn a point). Cached by
+        // heatRev (see cellsRaster/prewarmCells) so opening the view is instant.
+        raster = cellsRaster(f);
       } else {
         // Pressure view: pop pressure at points + split pressure at each cell's
         // prospective cut location. APPROXIMATION: the cut marker uses the raw
@@ -1431,6 +1468,7 @@ if (!api) {
     if (result.added > 0 || result.removed > 0 || result.newPoints > 0) refreshNativeDemandDots();
     syncPanelState();
     bumpHeat(); // the day's growth changed pressure/access → re-bake the field
+    prewarmCells(); // pre-cache the cells raster so opening that view stays smooth
     persistSession();
     if (result.removed > 0 || result.newPoints > 0) persistLedgerToStore();
   });

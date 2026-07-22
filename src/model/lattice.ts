@@ -175,6 +175,29 @@ export interface IntegrateOpts {
   deps: LatticeDeps;
 }
 
+/**
+ * Nearest point to `c` that isn't blocked (within `clearanceM`), spiralling out
+ * on the lattice up to `maxRings`; `c` itself if already clear, null if none.
+ * Snaps a concave cell's centroid — which can fall in a bay the cell wraps
+ * around even when every sample is dry — onto buildable land.
+ */
+function nearestClear(
+  c: Coordinate, deps: LatticeDeps, latticeM: number, clearanceM: number, maxRings = 12,
+): Coordinate | null {
+  if (!deps.blockedWithin(c, clearanceM)) return c;
+  const mLon = M_PER_DEG_LAT * Math.max(0.05, Math.cos((c[1] * Math.PI) / 180));
+  for (let r = 1; r <= maxRings; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue; // ring perimeter only
+        const p: Coordinate = [c[0] + (dx * latticeM) / mLon, c[1] + (dy * latticeM) / M_PER_DEG_LAT];
+        if (!deps.blockedWithin(p, clearanceM)) return p;
+      }
+    }
+  }
+  return null;
+}
+
 export function integrateCells(opts: IntegrateOpts): Map<string, CellIntegral> {
   const { deps } = opts;
   const index = createAnchorIndex(opts.anchors);
@@ -210,11 +233,11 @@ export function integrateCells(opts: IntegrateOpts): Map<string, CellIntegral> {
   });
   const out = new Map<string, CellIntegral>();
   for (const [id, c] of cells) {
-    out.set(id, {
-      supportedMass: c.supportedMass,
-      centroid: c.wSum > 0 ? [c.lonSum / c.wSum, c.latSum / c.wSum] : null,
-      pointCap: c.pointCap,
-    });
+    let centroid: Coordinate | null = c.wSum > 0 ? [c.lonSum / c.wSum, c.latSum / c.wSum] : null;
+    // Snap a concave cell's centroid off any water/airport it wraps around, so
+    // the targeting-display marker (and findCut's search centre) sit on land.
+    if (centroid) centroid = nearestClear(centroid, deps, opts.latticeM, clearanceM);
+    out.set(id, { supportedMass: c.supportedMass, centroid, pointCap: c.pointCap });
   }
   return out;
 }

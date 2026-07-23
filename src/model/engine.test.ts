@@ -44,6 +44,24 @@ function noAccessSites(dd: DemandData): Site[] {
 
 const cfg: InducedDemandConfig = { ...DEFAULT_CONFIG, R_GROW: 0.05, R_DECAY: 0.02 };
 
+test('sub-pop headroom: a small point holds unmet demand honestly and never overshoots', () => {
+  // 100 residents at K_MAX=1 → cap ≤ 200, so headroom ≤ 100: less than one
+  // POP_SIZE, meaning the point can never legitimately take a 200-person pop.
+  const dd = makeDD([point('S', 0, 0, 100, 0, 50, 0), point('J', 0, 0.001, 0, 100, 0, 50)]);
+  const led = newLedger();
+  captureBaselines(dd, led);
+  const sites = [siteOf(dd.points.get('S')!), siteOf(dd.points.get('J')!)];
+  for (let day = 0; day < 200; day++) runDay(dd, sites, led, cfg, makeRng(day), DAY_DEPS);
+  // Never overshoots: no 200-person pop is jammed into ≤100 people of room.
+  assert.equal(dd.points.get('S')!.residents, 100, 'residents unchanged — no room for a whole pop');
+  assert.equal(dd.points.get('J')!.jobs, 100, 'jobs unchanged — no room for a whole pop');
+  // Honest ledger: the accumulator holds the REAL unmet need (≤ headroom), not ACCUM_CAP.
+  const e = led.points['S'];
+  const maxHeadroom = 100 * cfg.K_MAX; // baseline × K_MAX × score, score ≤ 1
+  assert.ok(e.resAccum <= maxHeadroom + 1e-6, `accum clamped to headroom, got ${e.resAccum}`);
+  assert.ok(e.resAccum < cfg.ACCUM_CAP, 'does not balloon to ACCUM_CAP with phantom demand');
+});
+
 function inducedResidentsAt(dd: DemandData, ledger: LedgerState, id: string): number {
   let n = 0;
   for (const pop of dd.popsMap.values()) {

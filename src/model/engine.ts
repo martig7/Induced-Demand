@@ -123,13 +123,20 @@ export function runDay(
     const seed = (cur: number, capV: number): number =>
       isMat ? Math.max(cur, Math.min(cfg.POP_SIZE, capV)) : cur;
     const boost = isMat ? cfg.NEW_POINT_GROWTH_BOOST : 1;
+    // An accumulator is capped by the point's REAL remaining headroom, so it says
+    // what the point actually needs — a point with 40 people of room holds 40, not
+    // ACCUM_CAP. Without this a capped-out point keeps accruing phantom demand that
+    // inflates the day's budget and hands its pops to other points. The lower bound
+    // stays −ACCUM_CAP so over-cap decay can still drive removals.
+    const headRes = Math.max(0, cR - p.residents);
+    const headJob = Math.max(0, cJ - p.jobs);
     e.resAccum = clamp(
       e.resAccum + boost * logisticDelta(e.baselineResidents, seed(p.residents, cR), cR, sRes, cfg),
-      -cfg.ACCUM_CAP, cfg.ACCUM_CAP,
+      -cfg.ACCUM_CAP, Math.min(cfg.ACCUM_CAP, headRes),
     );
     e.jobAccum = clamp(
       e.jobAccum + boost * logisticDelta(e.baselineJobs, seed(p.jobs, cJ), cJ, sJob, cfg),
-      -cfg.ACCUM_CAP, cfg.ACCUM_CAP,
+      -cfg.ACCUM_CAP, Math.min(cfg.ACCUM_CAP, headJob),
     );
   }
 
@@ -142,27 +149,33 @@ export function runDay(
     const e = s.pointId ? ledger.points[s.pointId] : undefined;
     return e ? [e.resAccum, e.jobAccum] : [0, 0];
   };
-  const resWeights = sites.map((s) => Math.max(0, accumOf(s)[0]));
-  const jobWeights = sites.map((s) => Math.max(0, accumOf(s)[1]));
+  // FLOOR, not ceil: a pop is added only when the cap fully supports it, so a
+  // point settles at the largest POP_SIZE-multiple ≤ cap and never OVERSHOOTS.
+  // (ceil let a point with <1 pop of headroom take a whole pop, tipping it over
+  // cap, which the over-cap decay then shed — an endless add/decay churn on
+  // every point whose cap isn't a clean multiple of POP_SIZE.) Because an add
+  // leaves the point at or below cap, decay can never fire right after one —
+  // churn is precluded structurally, and a sub-pop remainder simply waits, as
+  // honest unmet demand, until the cap grows enough to clear a whole pop.
+  const remCapRes = sites.map((s) => {
+    const c = capRes.get(s.id) ?? 0;
+    const current = s.pointId ? (dd.points.get(s.pointId)?.residents ?? 0) : 0;
+    return Math.max(0, Math.floor((c - current) / cfg.POP_SIZE));
+  });
+  const remCapJob = sites.map((s) => {
+    const c = capJob.get(s.id) ?? 0;
+    const current = s.pointId ? (dd.points.get(s.pointId)?.jobs ?? 0) : 0;
+    return Math.max(0, Math.floor((c - current) / cfg.POP_SIZE));
+  });
+  // Weights count only PLACEABLE demand — a point's claim is capped at the whole
+  // pops it can actually accept. So 40 people of unmet need contribute 0 to the
+  // day's budget N instead of inflating it and donating those pops elsewhere.
+  const resWeights = sites.map((s, i) => Math.min(Math.max(0, accumOf(s)[0]), remCapRes[i] * cfg.POP_SIZE));
+  const jobWeights = sites.map((s, i) => Math.min(Math.max(0, accumOf(s)[1]), remCapJob[i] * cfg.POP_SIZE));
   const rp = resWeights.reduce((a, b) => a + b, 0);
   const jp = jobWeights.reduce((a, b) => a + b, 0);
   const N = Math.floor(reconcile(rp, jp, cfg.RECONCILE) / cfg.POP_SIZE);
   if (N > 0) {
-    // FLOOR, not ceil: a pop is added only when the cap fully supports it, so a
-    // point settles at the largest POP_SIZE-multiple ≤ cap and never OVERSHOOTS.
-    // (ceil let a point with <1 pop of headroom take a whole pop, tipping it over
-    // cap, which the over-cap decay then shed — an endless add/decay churn on
-    // every point whose cap isn't a clean multiple of POP_SIZE.)
-    const remCapRes = sites.map((s) => {
-      const c = capRes.get(s.id) ?? 0;
-      const current = s.pointId ? (dd.points.get(s.pointId)?.residents ?? 0) : 0;
-      return Math.max(0, Math.floor((c - current) / cfg.POP_SIZE));
-    });
-    const remCapJob = sites.map((s) => {
-      const c = capJob.get(s.id) ?? 0;
-      const current = s.pointId ? (dd.points.get(s.pointId)?.jobs ?? 0) : 0;
-      return Math.max(0, Math.floor((c - current) / cfg.POP_SIZE));
-    });
     const resPool = expand(ids, allocateInteger(resWeights, N, remCapRes));
     const jobPool = expand(ids, allocateInteger(jobWeights, N, remCapJob));
 

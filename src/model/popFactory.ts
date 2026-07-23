@@ -23,12 +23,13 @@ export function makeInducedPop(
   cfg: InducedDemandConfig,
   slots: SlotSet = DEFAULT_SLOT_SET,
   driving: DrivingModel = DEFAULT_DRIVING_MODEL,
+  size: number = cfg.POP_SIZE,
 ): Pop {
   const { distance, seconds } = driving.estimate(id, residenceId, jobId, resLoc, jobLoc);
   const { homeDepartureTime, workDepartureTime } = commuteTimesFor(id, jobId, slots);
   return {
     id,
-    size: cfg.POP_SIZE,
+    size,
     residenceId,
     jobId,
     drivingDistance: distance,
@@ -38,7 +39,11 @@ export function makeInducedPop(
   } as Pop;
 }
 
-/** Add one induced pop; +POP_SIZE residents at residence, +POP_SIZE jobs at job. */
+/**
+ * Add one induced pop; +size residents at residence, +size jobs at job. `size`
+ * defaults to a full POP_SIZE; a smaller "crumb" tops a point up to its next
+ * POP_SIZE boundary when a whole pop won't fit under cap (see engine.ts §B2).
+ */
 export function addInducedPop(
   dd: DemandData,
   residenceId: string,
@@ -47,15 +52,16 @@ export function addInducedPop(
   cfg: InducedDemandConfig,
   slots: SlotSet = DEFAULT_SLOT_SET,
   driving: DrivingModel = DEFAULT_DRIVING_MODEL,
+  size: number = cfg.POP_SIZE,
 ): boolean {
   const res = dd.points.get(residenceId);
   const job = dd.points.get(jobId);
   if (!res || !job) return false;
-  dd.popsMap.set(id, makeInducedPop(id, residenceId, jobId, res.location, job.location, cfg, slots, driving));
+  dd.popsMap.set(id, makeInducedPop(id, residenceId, jobId, res.location, job.location, cfg, slots, driving, size));
   res.popIds.push(id);
   job.popIds.push(id);
-  res.residents += cfg.POP_SIZE;
-  job.jobs += cfg.POP_SIZE;
+  res.residents += size;
+  job.jobs += size;
   return true;
 }
 
@@ -72,8 +78,8 @@ export function removeInducedPop(dd: DemandData, id: string, cfg: InducedDemandC
   if (!pop) return false;
   const res = dd.points.get(pop.residenceId);
   const job = dd.points.get(pop.jobId);
-  if (res) { res.residents -= cfg.POP_SIZE; dropId(res.popIds, id); }
-  if (job) { job.jobs -= cfg.POP_SIZE; dropId(job.popIds, id); }
+  if (res) { res.residents -= pop.size; dropId(res.popIds, id); }
+  if (job) { job.jobs -= pop.size; dropId(job.popIds, id); }
   dd.popsMap.delete(id);
   return true;
 }
@@ -92,8 +98,8 @@ export function detachInducedPop(dd: DemandData, id: string, cfg: InducedDemandC
   const res = dd.points.get(pop.residenceId);
   const job = dd.points.get(pop.jobId);
   let detached = false;
-  if (res?.popIds.includes(id)) { res.residents -= cfg.POP_SIZE; dropId(res.popIds, id); detached = true; }
-  if (job?.popIds.includes(id)) { job.jobs -= cfg.POP_SIZE; dropId(job.popIds, id); detached = true; }
+  if (res?.popIds.includes(id)) { res.residents -= pop.size; dropId(res.popIds, id); detached = true; }
+  if (job?.popIds.includes(id)) { job.jobs -= pop.size; dropId(job.popIds, id); detached = true; }
   // Size 0 makes the retained entry fully inert: it adds nothing to the game's
   // mode-share/ridership sums (which only ever ADD sizes) and our overlay's
   // per-point induced totals. Only the id needs to stay resolvable.

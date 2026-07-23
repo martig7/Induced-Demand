@@ -196,26 +196,84 @@ export function runDay(
     }
   }
 
-  // C. decay — unchanged from the pre-field engine: only occupied sites can decay.
+  // B2. crumb top-up — complete points sitting OFF the POP_SIZE grid to their
+  // next boundary, funded by their own honest unmet demand, when that boundary
+  // fits under cap. The whole-pop FLOOR above strands every point's sub-POP_SIZE
+  // remainder; where native demand is finely chopped below POP_SIZE (points far
+  // smaller than one pop), that stranded remainder is nearly all the headroom, so
+  // those points can never grow. A crumb pop carries a partial `size`, added to a
+  // residence and a job endpoint equally (net-equal preserved). Each pop completes
+  // the smaller of the paired gaps exactly and advances the larger; a point lands
+  // at or below cap, so decay can't fire right after — churn stays precluded.
+  const crumbGap = (current: number, capV: number, accum: number): number => {
+    const gap = (cfg.POP_SIZE - (current % cfg.POP_SIZE)) % cfg.POP_SIZE; // to next boundary
+    return gap > 0 && current + gap <= capV && accum >= gap ? gap : 0;
+  };
+  const resCrumb: { id: string; need: number }[] = [];
+  const jobCrumb: { id: string; need: number }[] = [];
+  for (const s of sites) {
+    if (!s.pointId) continue;
+    const p = dd.points.get(s.pointId);
+    const e = ledger.points[s.pointId];
+    if (!p || !e) continue;
+    const gr = crumbGap(p.residents, capRes.get(s.id) ?? 0, e.resAccum);
+    if (gr > 0) resCrumb.push({ id: s.pointId, need: gr });
+    const gj = crumbGap(p.jobs, capJob.get(s.id) ?? 0, e.jobAccum);
+    if (gj > 0) jobCrumb.push({ id: s.pointId, need: gj });
+  }
+  // Net-equal pairing: each pop adds the same `size` to one residence and one job,
+  // so total residents added == total jobs added regardless of match geometry.
+  for (let ri = 0, ji = 0; ri < resCrumb.length && ji < jobCrumb.length;) {
+    const rc = resCrumb[ri], jc = jobCrumb[ji];
+    if (rc.id === jc.id) { ji++; continue; } // no self-commute (matches pairByGravity)
+    const size = Math.min(rc.need, jc.need);
+    if (size > 0) {
+      const id = `${INDUCED_PREFIX}${ledger.seq}`;
+      if (addInducedPop(dd, rc.id, jc.id, id, cfg, slots, driving, size)) {
+        ledger.pops[id] = { residenceId: rc.id, jobId: jc.id };
+        ledger.seq++;
+        addedThisDay.add(id);
+        const eh = ledger.points[rc.id];
+        const ew = ledger.points[jc.id];
+        if (eh) eh.resAccum = Math.max(0, eh.resAccum - size);
+        if (ew) ew.jobAccum = Math.max(0, ew.jobAccum - size);
+        bumpDelta(deltas, rc.id, 'ar');
+        bumpDelta(deltas, jc.id, 'aj');
+        added++;
+        rc.need -= size;
+        jc.need -= size;
+      } else { ri++; continue; }
+    }
+    if (rc.need <= 0) ri++;
+    if (jc.need <= 0) ji++;
+  }
+
+  // C. decay — only occupied sites can decay. Size-aware: a pop is shed only when
+  // the accumulated deficit covers its FULL size (the churn deadband, per pop),
+  // and the accumulator is credited that pop's actual size (crumb or whole).
   let removed = 0;
   for (const s of sites) {
     if (!s.pointId) continue;
     const e = ledger.points[s.pointId];
     if (!e) continue;
-    while (e.resAccum <= -cfg.POP_SIZE) {
+    while (e.resAccum < 0) {
       const id = findInduced(dd, ledger, s.pointId, 'residence', addedThisDay);
-      if (!id) { e.resAccum = -cfg.POP_SIZE + 1; break; }
+      if (!id) { e.resAccum = Math.max(e.resAccum, -cfg.POP_SIZE + 1); break; }
+      const size = dd.popsMap.get(id)?.size ?? cfg.POP_SIZE;
+      if (e.resAccum > -size) break; // deficit doesn't cover this pop — hold it
       recordRemoval(dd, deltas, id);
       deferInducedPopRemoval(dd, ledger, id, cfg);
-      e.resAccum += cfg.POP_SIZE;
+      e.resAccum += size;
       removed++;
     }
-    while (e.jobAccum <= -cfg.POP_SIZE) {
+    while (e.jobAccum < 0) {
       const id = findInduced(dd, ledger, s.pointId, 'job', addedThisDay);
-      if (!id) { e.jobAccum = -cfg.POP_SIZE + 1; break; }
+      if (!id) { e.jobAccum = Math.max(e.jobAccum, -cfg.POP_SIZE + 1); break; }
+      const size = dd.popsMap.get(id)?.size ?? cfg.POP_SIZE;
+      if (e.jobAccum > -size) break; // deficit doesn't cover this pop — hold it
       recordRemoval(dd, deltas, id);
       deferInducedPopRemoval(dd, ledger, id, cfg);
-      e.jobAccum += cfg.POP_SIZE;
+      e.jobAccum += size;
       removed++;
     }
   }

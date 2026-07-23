@@ -62,6 +62,24 @@ test('sub-pop headroom: a small point holds unmet demand honestly and never over
   assert.ok(e.resAccum < cfg.ACCUM_CAP, 'does not balloon to ACCUM_CAP with phantom demand');
 });
 
+test('crumb top-up: an off-grid point fills to its next POP_SIZE boundary, then holds', () => {
+  // 150 residents at access 0.8 (score 0.6) → cap 240. The next boundary (200)
+  // fits under cap, so a crumb of 50 completes it; the following boundary (400)
+  // does NOT fit, so it settles at 200 and never overshoots. S (home) and J (work)
+  // are distinct points so the crumb can pair without a self-commute.
+  const dd = makeDD([point('S', 0, 0, 150, 0, 50, 0), point('J', 0, 0.001, 0, 150, 0, 50)]);
+  const led = newLedger();
+  captureBaselines(dd, led);
+  const sites = [siteOf(dd.points.get('S')!), siteOf(dd.points.get('J')!)];
+  for (let day = 0; day < 200; day++) runDay(dd, sites, led, cfg, makeRng(day), DAY_DEPS);
+  assert.equal(dd.points.get('S')!.residents, 200, 'residents topped up to the 200 boundary');
+  assert.equal(dd.points.get('J')!.jobs, 200, 'jobs topped up to the 200 boundary');
+  // Exactly one 50-person crumb on each side — no overshoot to 400, no churn.
+  const live = [...dd.popsMap.values()].filter((p) => isInduced(p.id) && !led.pendingRemovals?.includes(p.id));
+  assert.equal(live.length, 1, 'a single crumb pop');
+  assert.equal(live[0].size, 50, 'crumb sized to the boundary gap');
+});
+
 function inducedResidentsAt(dd: DemandData, ledger: LedgerState, id: string): number {
   let n = 0;
   for (const pop of dd.popsMap.values()) {
